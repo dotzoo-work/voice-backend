@@ -166,7 +166,7 @@ async def get_chatbot_response(message, bot_id="default"):
             chatbot_url,
             json=payload,
             headers={"Content-Type": "application/json"}
-            verify=False
+            
         )
         
         print(f"Chatbot API response status: {response.status_code}")
