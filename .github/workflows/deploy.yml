@@ -1,0 +1,108 @@
+name: CI/CD Deploy Voice Bot Backend to EC2
+
+on:
+  push:
+    branches: [main]
+    paths: ['backend/**']
+
+jobs:
+  Continuous-Integration:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v3
+
+      - name: Set up Python
+        uses: actions/setup-python@v4
+        with:
+          python-version: '3.11'
+
+      - name: Install dependencies and test
+        run: |
+          cd backend
+          pip install -r requirements.txt
+          python -c "import fastapi; print('✅ FastAPI imports successfully')"
+
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v1
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region: ${{ secrets.AWS_DEFAULT_REGION }}
+
+      - name: Login to Amazon ECR
+        id: login-ecr
+        uses: aws-actions/amazon-ecr-login@v1
+
+      - name: Build, tag, and push image to Amazon ECR
+        id: build-image
+        env:
+          ECR_REGISTRY: ${{ steps.login-ecr.outputs.registry }}
+          ECR_REPOSITORY: ${{ secrets.ECR_REPO }}
+        run: |
+          cd backend
+          IMAGE_TAG=$(date +%Y%m%d%H%M%S)-$(git rev-parse --short HEAD)
+          docker build --no-cache -t $ECR_REGISTRY/$ECR_REPOSITORY:$IMAGE_TAG -t $ECR_REGISTRY/$ECR_REPOSITORY:latest .
+          docker push $ECR_REGISTRY/$ECR_REPOSITORY:$IMAGE_TAG
+          docker push $ECR_REGISTRY/$ECR_REPOSITORY:latest
+          echo "image=$ECR_REGISTRY/$ECR_REPOSITORY:$IMAGE_TAG" >> $GITHUB_OUTPUT
+
+  Continuous-Deployment:
+    needs: Continuous-Integration
+    runs-on: self-hosted
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v3
+
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v1
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region: ${{ secrets.AWS_DEFAULT_REGION }}
+
+      - name: Login to Amazon ECR
+        id: login-ecr
+        uses: aws-actions/amazon-ecr-login@v1
+
+      - name: Stop and remove existing container
+        run: |
+          CONTAINER_ID=$(docker ps -aq -f name=voice-bot-backend)
+          if [ ! -z "$CONTAINER_ID" ]; then
+            echo "Stopping existing container..."
+            docker stop -t 30 $CONTAINER_ID || true
+            echo "Removing existing container..."
+            docker rm -f $CONTAINER_ID || true
+          else
+            echo "No existing container found."
+          fi
+
+      - name: Pull latest image
+        run: |
+          docker pull "${{ steps.login-ecr.outputs.registry }}/${{ secrets.ECR_REPO }}:latest"
+
+      - name: Run Docker Container
+        run: |
+          docker run -d --name voice-bot-backend \
+            --restart unless-stopped \
+            -e AWS_ACCESS_KEY_ID="${{ secrets.AWS_ACCESS_KEY_ID }}" \
+            -e AWS_SECRET_ACCESS_KEY="${{ secrets.AWS_SECRET_ACCESS_KEY }}" \
+            -e AWS_DEFAULT_REGION="${{ secrets.AWS_DEFAULT_REGION }}" \
+            -e OPENAI_API_KEY="${{ secrets.OPENAI_API_KEY }}" \
+            -e REDIS_URL="${{ secrets.REDIS_URL }}" \
+            -e ENVIRONMENT="production" \
+            -e PORT="8090" \
+            -p 8090:8090 \
+            "${{ steps.login-ecr.outputs.registry }}/${{ secrets.ECR_REPO }}:latest"
+
+      - name: Clean up old Docker images
+        run: |
+          echo "Cleaning up unused Docker images..."
+          docker image prune -af
+
+      - name: Health check
+        run: |
+          sleep 10
+          curl -f http://localhost:8090/ || exit 1
