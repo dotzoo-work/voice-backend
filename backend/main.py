@@ -47,11 +47,7 @@ client = openai.OpenAI(
 CHATBOT_URLS = {
     "dr-tomar": "https://edmonds.yesitisfree.com/api/chat",
     
-    "project2": "http://localhost:8002/api/chat",
-    "project3": "http://localhost:8003/api/chat",
-    "dental-clinic": "http://localhost:8004/api/chat",
-    "law-firm": "http://localhost:8005/api/chat",
-    "restaurant": "http://localhost:8006/api/chat",
+    
     "default": "https://edmonds.yesitisfree.com/api/chat"
 }
 
