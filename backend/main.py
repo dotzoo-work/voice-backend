@@ -31,7 +31,8 @@ app = FastAPI(title="Voice Backend Service")
 
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],
+    allow_origins=[ "https://www.edmondsbaydental.com",
+        "https://voice.yesitisfree.com",],
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
