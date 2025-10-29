@@ -44,14 +44,14 @@ client = openai.OpenAI(
 
 # Multiple chatbots configuration - Add your projects here
 CHATBOT_URLS = {
-    "dr-tomar": "http://localhost:8000/api/chat",
-    "edmonds": "http://localhost:8001/api/chat", 
+    "dr-tomar": "https://edmonds.yesitisfree.com/api/chat",
+    
     "project2": "http://localhost:8002/api/chat",
     "project3": "http://localhost:8003/api/chat",
     "dental-clinic": "http://localhost:8004/api/chat",
     "law-firm": "http://localhost:8005/api/chat",
     "restaurant": "http://localhost:8006/api/chat",
-    "default": "http://localhost:8000/api/chat"
+    "default": "https://edmonds.yesitisfree.com/api/chat"
 }
 
 # Redis configuration - Disabled for now
