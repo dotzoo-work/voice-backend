@@ -3,7 +3,8 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
 import openai
-
+import httpx
+import traceback
 # Request models
 class ChatRequest(BaseModel):
     message: str
@@ -141,85 +142,44 @@ def clean_text_for_tts(text):
     except Exception as e:
         print(f"Cleaning error: {e}")
         return "There was a text processing error."
+async def get_chatbot_response(message: str, bot_id: str = "default"):
+    """
+    Call the chatbot backend API safely and return the response text.
+    """
+    chatbot_url = "https://edmonds.yesitisfree.com/api/chat"
+    payload = {"message": message}
 
-async def get_chatbot_response(message, bot_id="default"):
-    message_lower = message.lower().strip()
-    
-    # Get chatbot URL based on bot_id
-    chatbot_url = CHATBOT_URLS.get(bot_id, CHATBOT_URLS["default"])
-    print(f"Using chatbot URL for bot_id '{bot_id}': {chatbot_url}")
-    
-    # Fast common responses first
-    for key, response in COMMON_RESPONSES.items():
-        if key in message_lower:
-            return response
-    
-    # Try chatbot API - test different payload formats
+    print(f"📡 Sending message to chatbot API: {chatbot_url}")
+    print(f"Payload: {payload}")
+
     try:
-        # First try with simple message payload
-        payload = {"message": message}
-        
-        print(f"Calling chatbot API with payload: {payload}")
-        
-        # Direct API call without timeout wrapper
-        response = await connection_pool.post(
-            chatbot_url,
-            json=payload,
-            headers={"Content-Type": "application/json"}
-            
-        )
-        
-        print(f"Chatbot API response status: {response.status_code}")
-        print(f"Response headers: {dict(response.headers)}")
-        
+        async with httpx.AsyncClient(timeout=httpx.Timeout(30.0, connect=10.0)) as client:
+            response = await client.post(chatbot_url, json=payload, headers={"Content-Type": "application/json"})
+
+        print(f"✅ Chatbot API status: {response.status_code}")
+        print(f"✅ Chatbot API raw response: {response.text}")
+
         if response.status_code == 200:
-            result = response.json()
-            print(f"Chatbot API response: {result}")
-            return result.get("response", result.get("answer", "I received your message and I'm processing it."))
+            data = response.json()
+            return data.get("response") or data.get("answer") or "I'm processing your message."
         else:
-            response_text = response.text
-            print(f"Chatbot API error: {response.status_code} - {response_text}")
-            
-            # Try with session_id if first attempt fails
-            import uuid
-            session_id = str(uuid.uuid4())[:8]
-            payload_with_session = {
-                "message": message,
-                "session_id": session_id
-            }
-            
-            print(f"Retrying with session_id: {payload_with_session}")
-            
-            response2 = await connection_pool.post(
-                chatbot_url,
-                json=payload_with_session,
-                headers={"Content-Type": "application/json"}
-            )
-            
-            if response2.status_code == 200:
-                result = response2.json()
-                print(f"Chatbot API response (retry): {result}")
-                return result.get("response", result.get("answer", "I received your message and I'm processing it."))
-            else:
-                print(f"Retry also failed: {response2.status_code} - {response2.text}")
-            
-    except httpx.TimeoutException:
-        print("Chatbot API timeout - using fallback")
+            print(f"⚠️ Chatbot API returned non-200: {response.status_code}")
+            return "I'm having trouble connecting to the assistant. Please try again."
+
     except httpx.ConnectError as e:
-        print(f"Chatbot API connection refused: {str(e)}")
+        print(f"❌ Connection error: {e}")
+        traceback.print_exc()
+        return "I couldn’t reach the chatbot service. Please check your connection."
+
+    except httpx.TimeoutException:
+        print("⚠️ Timeout contacting chatbot API.")
+        return "The chatbot took too long to respond. Please try again."
+
     except Exception as e:
-        print(f"Chatbot API unexpected error: {type(e).__name__}: {str(e)}")
-    
-    # Enhanced fallback responses
-    """if any(word in message_lower for word in ["office", "hours", "open", "time"]):
-        return "Our office hours are Monday to Friday 9 AM to 6 PM, and Saturday 9 AM to 2 PM. How can I help you?"
-    elif any(word in message_lower for word in ["appointment", "schedule", "book", "see"]):
-        return "I'd be happy to help you schedule an appointment. Please call us at 425-775-5162 or let me know your preferred date."
-    elif "help" in message_lower:
-        return "I'm here to assist you. What can I help you with today?"
-    else:
-        return "Thank you for your question. For detailed information, please call our office at 425-775-5162."
-"""
+        print(f"❌ Unexpected error: {e}")
+        traceback.print_exc()
+        return "An unexpected error occurred. Please try again later."
+
 # API Endpoints
 @app.get("/session-ephemeral")
 async def get_session_ephemeral(bot_id: str = "default"):
@@ -945,10 +905,6 @@ async def voice_chat(file: UploadFile = File(...), bot_id: str = "default"):
             "response": "I had trouble processing your request. Please try again.",
             "error": str(e)
         }
-
-
-
-
 
 @app.get("/")
 async def root():
