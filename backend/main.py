@@ -186,7 +186,7 @@ async def get_session_ephemeral(bot_id: str = "default"):
     """Create ephemeral OpenAI Realtime token"""
     try:
         response = client.beta.realtime.sessions.create(
-            model="gpt-4o-realtime-preview-2024-10-01",
+            model="gpt-4o-mini",
             voice="nova"
         )
         return {
@@ -250,7 +250,7 @@ async def generate_single_tts_chunk(chunk, chunk_index):
     
     try:
         response = client.audio.speech.create(
-            model="tts-1-hd",
+            model="tts-1",
             voice="nova",
             input=chunk
         )
@@ -310,7 +310,7 @@ async def generate_tts_audio(text):
     
     try:
         response = client.audio.speech.create(
-            model="tts-1-hd",
+            model="tts-1",
             voice="nova",
             input=text
         )
