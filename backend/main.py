@@ -142,12 +142,17 @@ def clean_text_for_tts(text):
     except Exception as e:
         print(f"Cleaning error: {e}")
         return "There was a text processing error."
-async def get_chatbot_response(message: str, bot_id: str = "default"):
+async def get_chatbot_response(message: str, bot_id: str = "default", lang: str = "en"):
     """
     Call the chatbot backend API safely and return the response text.
     """
-    chatbot_url = "https://edmonds.yesitisfree.com/api/chat"
-    payload = {"message": message}
+    # Use bot_id to get the correct URL
+    chatbot_url = CHATBOT_URLS.get(bot_id, CHATBOT_URLS["default"])
+    payload = {
+        "message": message,
+        "bot_id": bot_id,
+        "language": lang
+    }
 
     print(f"📡 Sending message to chatbot API: {chatbot_url}")
     print(f"Payload: {payload}")
@@ -235,7 +240,7 @@ def split_text_for_streaming(text, chunk_size=100):
     
     return chunks
 
-async def generate_single_tts_chunk(chunk, chunk_index):
+async def generate_single_tts_chunk(chunk, chunk_index, lang="en"):
     """Generate TTS for a single chunk"""
     cache_key = get_cache_key(chunk)
     
@@ -251,8 +256,9 @@ async def generate_single_tts_chunk(chunk, chunk_index):
     try:
         response = client.audio.speech.create(
             model="tts-1",
-            voice="nova",
-            input=chunk
+            voice="alloy",
+            input=chunk,
+            language=lang
         )
         audio_content = response.content
         
@@ -265,13 +271,13 @@ async def generate_single_tts_chunk(chunk, chunk_index):
         print(f"TTS Chunk Error: {e}")
         return chunk_index, None, chunk
 
-async def generate_tts_audio_streaming(text, websocket):
+async def generate_tts_audio_streaming(text, websocket, lang="en"):
     """Generate TTS audio in parallel chunks and stream to websocket"""
     chunks = split_text_for_streaming(text, 150)
     
     # Generate all chunks in parallel
     tasks = [
-        generate_single_tts_chunk(chunk, i) 
+        generate_single_tts_chunk(chunk, i, lang) 
         for i, chunk in enumerate(chunks)
     ]
     
@@ -295,7 +301,7 @@ async def generate_tts_audio_streaming(text, websocket):
 
 
 
-async def generate_tts_audio(text):
+async def generate_tts_audio(text, lang="en"):
     cache_key = get_cache_key(text)
     
     # Check Redis first
@@ -311,8 +317,9 @@ async def generate_tts_audio(text):
     try:
         response = client.audio.speech.create(
             model="tts-1",
-            voice="nova",
-            input=text
+            voice="alloy",
+            input=text,
+            language=lang
         )
         audio_content = response.content
         
@@ -334,10 +341,14 @@ async def speech_to_text(file: UploadFile = File(...)):
         
         transcript = client.audio.transcriptions.create(
             model="whisper-1",
-            file=audio_file
+            file=audio_file,
+            response_format="verbose_json"
         )
         
-        return {"text": transcript.text}
+        return {
+            "text": transcript.text,
+            "language": transcript.language
+        }
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"STT failed: {str(e)}")
 
@@ -391,7 +402,7 @@ async def voice_realtime_websocket(websocket: WebSocket, bot_id: str = "default"
             
             # Process complete audio recording
             if len(audio_buffer) > 0:
-                asyncio.create_task(process_complete_audio(
+                asyncio.create_task(process_realtime_audio(
                     audio_buffer, websocket, session_id, bot_id
                 ))
             
@@ -440,6 +451,12 @@ async def voice_realtime_websocket(websocket: WebSocket, bot_id: str = "default"
                     if auto_stop_task:
                         auto_stop_task.cancel()
                     
+                    # Process the audio before reset
+                    if len(audio_buffer) > 0:
+                        asyncio.create_task(process_realtime_audio(
+                            audio_buffer, websocket, session_id, bot_id
+                        ))
+                    
                     # Reset for next recording
                     audio_buffer = b""
                     session_id = int(time.time())
@@ -453,61 +470,74 @@ async def voice_realtime_websocket(websocket: WebSocket, bot_id: str = "default"
 async def process_realtime_audio(audio_data, websocket, session_id, bot_id="default"):
     """Process audio in real-time with immediate response"""
     try:
+        # Send processing status
+        await websocket.send_json({
+            "type": "processing_started",
+            "session_id": session_id
+        })
+        
         # STT processing
         audio_file = io.BytesIO(audio_data)
-        audio_file.name = f"realtime_{session_id}.wav"
+        # Detect format and use appropriate extension
+        if len(audio_data) > 4 and audio_data[:4] == b'RIFF':
+            audio_file.name = f"realtime_{session_id}.wav"
+        else:
+            audio_file.name = f"realtime_{session_id}.webm"
         
         transcript = client.audio.transcriptions.create(
             model="whisper-1",
             file=audio_file,
-            response_format="text",
-            language="en"
+            response_format="verbose_json"
         )
         
         user_text = transcript.text.strip()
+        spoken_lang = transcript.language
         
         if user_text:
             # Send transcript immediately
             await websocket.send_json({
                 "type": "transcript",
                 "text": user_text,
+                "language": spoken_lang,
                 "session_id": session_id
             })
             
-            # Get chatbot response and TTS in parallel
-            async def get_response():
-                bot_response = await get_chatbot_response(user_text, bot_id)
+            # Get chatbot response with detected language
+            bot_response = await get_chatbot_response(user_text, bot_id, spoken_lang)
+            
+            # Send bot response
+            await websocket.send_json({
+                "type": "bot_response",
+                "text": bot_response,
+                "session_id": session_id
+            })
+            
+            # Generate TTS with detected language
+            clean_text = clean_text_for_tts(bot_response)
+            optimized_text = optimize_text_for_tts(clean_text)
+            
+            audio_content = await generate_tts_audio(optimized_text, spoken_lang)
+            
+            if audio_content:
+                audio_b64 = base64.b64encode(audio_content).decode()
                 await websocket.send_json({
-                    "type": "bot_response",
-                    "text": bot_response,
+                    "type": "audio_response",
+                    "data": audio_b64,
                     "session_id": session_id
                 })
-                return bot_response
-            
-            async def generate_audio(bot_text):
-                clean_text = clean_text_for_tts(bot_text)
-                optimized_text = optimize_text_for_tts(clean_text)
-                audio_content = await generate_tts_audio(optimized_text)
-                
-                if audio_content:
-                    audio_b64 = base64.b64encode(audio_content).decode()
-                    await websocket.send_json({
-                        "type": "audio_response",
-                        "data": audio_b64,
-                        "session_id": session_id
-                    })
-            
-            # Run response and TTS generation
-            bot_response = await get_response()
-            await generate_audio(bot_response)
-            
         else:
             await websocket.send_json({
                 "type": "no_speech_detected",
                 "session_id": session_id
             })
         
-        # Processing complete - ready for next
+        # Processing complete
+        await websocket.send_json({
+            "type": "processing_complete",
+            "session_id": session_id
+        })
+        
+        # Send ready signal
         await websocket.send_json({
             "type": "ready_for_next",
             "session_id": session_id
@@ -547,32 +577,23 @@ async def process_complete_audio(audio_data, websocket, session_id, bot_id="defa
         transcript = client.audio.transcriptions.create(
             model="whisper-1",
             file=audio_file,
-            response_format="text",
-            language="en"
+            response_format="verbose_json"
         )
         
-        # Handle transcript response safely
-        try:
-            if hasattr(transcript, 'text'):
-                user_text = transcript.text.strip()
-            elif isinstance(transcript, str):
-                user_text = transcript.strip()
-            else:
-                user_text = str(transcript).strip()
-        except Exception as e:
-            print(f"Transcript parsing error: {e}")
-            user_text = ""
+        user_text = transcript.text.strip()
+        spoken_lang = transcript.language
         
         if user_text:
             # Send transcript
             await websocket.send_json({
                 "type": "transcript",
                 "text": user_text,
+                "language": spoken_lang,
                 "session_id": session_id
             })
             
-            # Get chatbot response using bot_id
-            bot_response = await get_chatbot_response(user_text, bot_id)
+            # Get chatbot response with detected language
+            bot_response = await get_chatbot_response(user_text, bot_id, spoken_lang)
             
             # Send bot response
             await websocket.send_json({
@@ -581,11 +602,11 @@ async def process_complete_audio(audio_data, websocket, session_id, bot_id="defa
                 "session_id": session_id
             })
             
-            # Generate TTS
+            # Generate TTS with detected language
             clean_text = clean_text_for_tts(bot_response)
             optimized_text = optimize_text_for_tts(clean_text)
             
-            audio_content = await generate_tts_audio(optimized_text)
+            audio_content = await generate_tts_audio(optimized_text, spoken_lang)
             
             if audio_content:
                 audio_b64 = base64.b64encode(audio_content).decode()
@@ -634,8 +655,7 @@ async def process_audio_chunk(audio_data, websocket, chunk_id):
         transcript = client.audio.transcriptions.create(
             model="whisper-1",
             file=audio_file,
-            response_format="text",
-            language="en"
+            response_format="verbose_json"
         )
         
         # Handle both text response and object response
@@ -659,11 +679,11 @@ async def process_audio_chunk(audio_data, websocket, chunk_id):
         print(f"Chunk processing error: {e}")
         # Don't fail completely, just skip this chunk
 
-async def process_chunk_response(text, websocket, chunk_id):
+async def process_chunk_response(text, websocket, chunk_id, bot_id="default"):
     """Process chatbot response for chunk"""
     try:
         # Get bot response
-        bot_response = await get_chatbot_response(text)
+        bot_response = await get_chatbot_response(text, bot_id)
         
         # Send response immediately
         await websocket.send_json({
@@ -678,13 +698,13 @@ async def process_chunk_response(text, websocket, chunk_id):
     except Exception as e:
         print(f"Chunk response error: {e}")
 
-async def generate_chunk_tts(text, websocket, chunk_id):
+async def generate_chunk_tts(text, websocket, chunk_id, lang="en"):
     """Generate TTS for chunk response"""
     try:
         clean_text = clean_text_for_tts(text)
         optimized_text = optimize_text_for_tts(clean_text)
         
-        audio_content = await generate_tts_audio(optimized_text)
+        audio_content = await generate_tts_audio(optimized_text, lang)
         
         if audio_content:
             audio_b64 = base64.b64encode(audio_content).decode()
@@ -698,7 +718,7 @@ async def generate_chunk_tts(text, websocket, chunk_id):
         print(f"Chunk TTS error: {e}")
 
 @app.websocket("/ws/voice-stream")
-async def voice_stream_websocket(websocket: WebSocket):
+async def voice_stream_websocket(websocket: WebSocket, bot_id: str = "default"):
     await websocket.accept()
     
     try:
@@ -708,24 +728,25 @@ async def voice_stream_websocket(websocket: WebSocket):
             audio_file = io.BytesIO(data)
             audio_file.name = "stream.wav"
             
-            # Faster STT with language hint
+            # STT with auto language detection
             transcript = client.audio.transcriptions.create(
                 model="whisper-1",
                 file=audio_file,
-                response_format="text",
-                language="en"
+                response_format="verbose_json"
             )
             
             user_text = transcript.text
+            spoken_lang = transcript.language
             
             await websocket.send_json({
                 "type": "transcript",
-                "text": user_text
+                "text": user_text,
+                "language": spoken_lang
             })
             
             # Ultra-fast parallel processing
             async def get_and_send_response():
-                bot_response = await get_chatbot_response(user_text)
+                bot_response = await get_chatbot_response(user_text, bot_id, spoken_lang)
                 await websocket.send_json({
                     "type": "bot_response",
                     "text": bot_response
@@ -735,7 +756,7 @@ async def voice_stream_websocket(websocket: WebSocket):
             async def process_tts(bot_response):
                 clean_response = clean_text_for_tts(bot_response)
                 optimized_response = optimize_text_for_tts(clean_response)
-                await generate_tts_audio_streaming(optimized_response, websocket)
+                await generate_tts_audio_streaming(optimized_response, websocket, spoken_lang)
                 await websocket.send_json({"type": "audio_complete"})
             
             # Start chat response immediately
@@ -750,7 +771,7 @@ async def voice_stream_websocket(websocket: WebSocket):
         await websocket.close()
 
 @app.websocket("/ws/voice-stream-legacy")
-async def voice_stream_legacy(websocket: WebSocket):
+async def voice_stream_legacy(websocket: WebSocket, bot_id: str = "default"):
     """Legacy endpoint with full audio response"""
     await websocket.accept()
     
@@ -763,18 +784,21 @@ async def voice_stream_legacy(websocket: WebSocket):
             
             transcript = client.audio.transcriptions.create(
                 model="whisper-1",
-                file=audio_file
+                file=audio_file,
+                response_format="verbose_json"
             )
             
             user_text = transcript.text
+            spoken_lang = transcript.language
             
             await websocket.send_json({
                 "type": "transcript",
-                "text": user_text
+                "text": user_text,
+                "language": spoken_lang
             })
             
             async def process_response():
-                bot_response = await get_chatbot_response(user_text)
+                bot_response = await get_chatbot_response(user_text, bot_id, spoken_lang)
                 
                 await websocket.send_json({
                     "type": "bot_response",
@@ -784,7 +808,7 @@ async def voice_stream_legacy(websocket: WebSocket):
                 clean_response = clean_text_for_tts(bot_response)
                 optimized_response = optimize_text_for_tts(clean_response)
                 
-                audio_content = await generate_tts_audio(optimized_response)
+                audio_content = await generate_tts_audio(optimized_response, spoken_lang)
                 if audio_content:
                     audio_b64 = base64.b64encode(audio_content).decode()
                     await websocket.send_json({
@@ -861,17 +885,19 @@ async def voice_chat(file: UploadFile = File(...), bot_id: str = "default"):
         
         transcript = client.audio.transcriptions.create(
             model="whisper-1",
-            file=audio_file
+            file=audio_file,
+            response_format="verbose_json"
         )
         
         user_text = transcript.text.strip()
+        spoken_lang = transcript.language
         if not user_text:
             user_text = "Hello"
         
-        print(f"User: {user_text}")
+        print(f"User: {user_text} (Language: {spoken_lang})")
         
-        # Get chatbot response
-        bot_response = await get_chatbot_response(user_text)
+        # Get chatbot response with detected language
+        bot_response = await get_chatbot_response(user_text, bot_id, spoken_lang)
         print(f"Bot original: {bot_response}")
         
         # Clean and optimize response
@@ -879,8 +905,8 @@ async def voice_chat(file: UploadFile = File(...), bot_id: str = "default"):
         optimized_response = optimize_text_for_tts(clean_response)
         print(f"Bot optimized: {optimized_response}")
         
-        # Generate TTS
-        audio_content = await generate_tts_audio(optimized_response)
+        # Generate TTS with detected language
+        audio_content = await generate_tts_audio(optimized_response, spoken_lang)
         
         if audio_content:
             return StreamingResponse(
