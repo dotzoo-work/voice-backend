@@ -299,7 +299,7 @@ async def generate_single_tts_chunk(chunk, chunk_index, lang="en"):
         voice = voice_map.get(lang.lower(), "alloy")
         
         response = client.audio.speech.create(
-            model="tts-1",
+            model="tts-1-hd",
             voice=voice,
             input=chunk
         )
@@ -372,7 +372,7 @@ async def generate_tts_audio(text, lang="en"):
         print(f"🎵 Generating TTS with voice: {voice} for language: {lang}")
         
         response = client.audio.speech.create(
-            model="tts-1",
+            model="tts-1-hd",
             voice=voice,
             input=text
         )
@@ -395,7 +395,7 @@ async def speech_to_text(file: UploadFile = File(...)):
         audio_file.name = "audio.wav"
         
         transcript = client.audio.transcriptions.create(
-            model="whisper-1",
+            model="gpt-4o-transcribe",
             file=audio_file,
             response_format="verbose_json"
         )
@@ -787,9 +787,9 @@ async def voice_stream_websocket(websocket: WebSocket, bot_id: str = "default"):
             audio_file = io.BytesIO(data)
             audio_file.name = "stream.wav"
             
-            # STT with auto language detection
+            # STT with high accuracy language detection
             transcript = client.audio.transcriptions.create(
-                model="whisper-1",
+                model="gpt-4o-transcribe",
                 file=audio_file,
                 response_format="verbose_json"
             )
@@ -842,7 +842,7 @@ async def voice_stream_legacy(websocket: WebSocket, bot_id: str = "default"):
             audio_file.name = "stream.wav"
             
             transcript = client.audio.transcriptions.create(
-                model="whisper-1",
+                model="gpt-4o-transcribe",
                 file=audio_file,
                 response_format="verbose_json"
             )
@@ -943,7 +943,7 @@ async def voice_chat(file: UploadFile = File(...), bot_id: str = "default"):
         audio_file.name = "audio.wav"
         
         transcript = client.audio.transcriptions.create(
-            model="whisper-1",
+            model="gpt-4o-transcribe",
             file=audio_file,
             response_format="verbose_json"
         )
