@@ -1,6 +1,6 @@
 from fastapi import FastAPI, HTTPException, File, UploadFile, WebSocket
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import StreamingResponse
+from fastapi.responses import StreamingResponse, Response
 from pydantic import BaseModel
 import openai
 import httpx
@@ -13,6 +13,7 @@ class ChatRequest(BaseModel):
 class RelayRequest(BaseModel):
     message: str
     bot_id: str = "default"
+    language: str = "en"
 import os
 from dotenv import load_dotenv
 import httpx
@@ -32,8 +33,15 @@ app = FastAPI(title="Voice Backend Service")
 
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=[ "https://www.edmondsbaydental.com",
-        "https://voice.yesitisfree.com",],
+    allow_origins=[
+        "https://www.edmondsbaydental.com",
+        "https://voice.yesitisfree.com",
+        "http://localhost:3000",
+        "http://localhost:3001",
+        "http://localhost:5173",
+        "http://127.0.0.1:3000",
+        "http://127.0.0.1:5173"
+    ],
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
@@ -127,17 +135,15 @@ def clean_text_for_tts(text):
     text = str(text)
     
     try:
-        text = unicodedata.normalize('NFKD', text)
-        ascii_text = ''.join(c for c in text if ord(c) < 128)
+        # Remove HTML entities but keep Unicode characters for multilingual support
+        text = re.sub(r'&#\d+;', '', text)
+        text = re.sub(r'&\w+;', '', text)
+        text = re.sub(r'\s+', ' ', text).strip()
         
-        ascii_text = re.sub(r'&#\d+;', '', ascii_text)
-        ascii_text = re.sub(r'&\w+;', '', ascii_text)
-        ascii_text = re.sub(r'\s+', ' ', ascii_text).strip()
-        
-        if len(ascii_text) < 3:
+        if len(text) < 3:
             return "I apologize for the formatting issue."
             
-        return ascii_text
+        return text
         
     except Exception as e:
         print(f"Cleaning error: {e}")
@@ -155,7 +161,8 @@ async def get_chatbot_response(message: str, bot_id: str = "default", lang: str 
     }
 
     print(f"📡 Sending message to chatbot API: {chatbot_url}")
-    print(f"Payload: {payload}")
+    print(f"📦 Payload: {payload}")
+    print(f"🌍 Language being sent: {lang}")
 
     try:
         async with httpx.AsyncClient(timeout=httpx.Timeout(30.0, connect=10.0)) as client:
@@ -163,6 +170,7 @@ async def get_chatbot_response(message: str, bot_id: str = "default", lang: str 
 
         print(f"✅ Chatbot API status: {response.status_code}")
         print(f"✅ Chatbot API raw response: {response.text}")
+        print(f"🔍 Response length: {len(response.text)} characters")
 
         if response.status_code == 200:
             data = response.json()
@@ -208,10 +216,34 @@ async def get_session_ephemeral(bot_id: str = "default"):
 async def relay_message(request: RelayRequest):
     """Relay message to chatbot backend"""
     try:
-        response = await get_chatbot_response(request.message, request.bot_id)
-        return {"response": response, "bot_id": request.bot_id}
+        print(f"🔍 Relay request - Message: {request.message}, Language: {request.language}, Bot: {request.bot_id}")
+        response = await get_chatbot_response(request.message, request.bot_id, request.language)
+        print(f"🔍 Relay response: {response}")
+        return {"response": response, "bot_id": request.bot_id, "language": request.language}
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
+
+@app.get("/test-multilingual")
+async def test_multilingual(message: str = "नमस्ते", bot_id: str = "default", lang: str = "hi"):
+    """Test multilingual chatbot response"""
+    try:
+        print(f"🧪 Testing multilingual - Message: {message}, Language: {lang}")
+        response = await get_chatbot_response(message, bot_id, lang)
+        print(f"🧪 Test response: {response}")
+        return {
+            "success": True,
+            "input_message": message,
+            "input_language": lang,
+            "bot_response": response,
+            "bot_id": bot_id
+        }
+    except Exception as e:
+        return {
+            "success": False,
+            "error": str(e),
+            "input_message": message,
+            "input_language": lang
+        }
 
 async def get_redis_cache(key):
     # Redis disabled - return None
@@ -242,28 +274,39 @@ def split_text_for_streaming(text, chunk_size=100):
 
 async def generate_single_tts_chunk(chunk, chunk_index, lang="en"):
     """Generate TTS for a single chunk"""
-    cache_key = get_cache_key(chunk)
+    cache_key = get_cache_key(f"{chunk}_{lang}")
     
     # Check cache first
     cached_audio = await get_redis_cache(cache_key)
     if cached_audio:
         return chunk_index, base64.b64decode(cached_audio), chunk
     
-    local_cached = get_cached_tts(chunk)
+    local_cached = get_cached_tts(f"{chunk}_{lang}")
     if local_cached:
         return chunk_index, local_cached, chunk
     
     try:
+        # Select voice based on language
+        voice_map = {
+            "hi": "nova", "hindi": "nova", "ur": "nova", "urdu": "nova",
+            "pa": "nova", "punjabi": "nova", "panjabi": "nova",
+            "es": "nova", "spanish": "nova", "fr": "shimmer", "french": "shimmer",
+            "de": "echo", "german": "echo", "it": "alloy", "italian": "alloy",
+            "pt": "onyx", "portuguese": "onyx", "ja": "nova", "japanese": "nova",
+            "ko": "nova", "korean": "nova", "zh": "nova", "chinese": "nova",
+            "ar": "nova", "arabic": "nova", "ru": "echo", "russian": "echo"
+        }
+        voice = voice_map.get(lang.lower(), "alloy")
+        
         response = client.audio.speech.create(
             model="tts-1",
-            voice="alloy",
-            input=chunk,
-            language=lang
+            voice=voice,
+            input=chunk
         )
         audio_content = response.content
         
-        # Cache the chunk
-        cache_tts(chunk, audio_content)
+        # Cache the chunk with language
+        cache_tts(f"{chunk}_{lang}", audio_content)
         await set_redis_cache(cache_key, base64.b64encode(audio_content).decode())
         
         return chunk_index, audio_content, chunk
@@ -302,7 +345,7 @@ async def generate_tts_audio_streaming(text, websocket, lang="en"):
 
 
 async def generate_tts_audio(text, lang="en"):
-    cache_key = get_cache_key(text)
+    cache_key = get_cache_key(f"{text}_{lang}")
     
     # Check Redis first
     cached_audio = await get_redis_cache(cache_key)
@@ -310,21 +353,33 @@ async def generate_tts_audio(text, lang="en"):
         return base64.b64decode(cached_audio)
     
     # Check local cache
-    local_cached = get_cached_tts(text)
+    local_cached = get_cached_tts(f"{text}_{lang}")
     if local_cached:
         return local_cached
     
     try:
+        # Select voice based on language
+        voice_map = {
+            "hi": "nova", "hindi": "nova", "ur": "nova", "urdu": "nova",
+            "pa": "nova", "punjabi": "nova", "panjabi": "nova",
+            "es": "nova", "spanish": "nova", "fr": "shimmer", "french": "shimmer",
+            "de": "echo", "german": "echo", "it": "alloy", "italian": "alloy",
+            "pt": "onyx", "portuguese": "onyx", "ja": "nova", "japanese": "nova",
+            "ko": "nova", "korean": "nova", "zh": "nova", "chinese": "nova",
+            "ar": "nova", "arabic": "nova", "ru": "echo", "russian": "echo"
+        }
+        voice = voice_map.get(lang.lower(), "alloy")
+        print(f"🎵 Generating TTS with voice: {voice} for language: {lang}")
+        
         response = client.audio.speech.create(
             model="tts-1",
-            voice="alloy",
-            input=text,
-            language=lang
+            voice=voice,
+            input=text
         )
         audio_content = response.content
         
-        # Cache in both Redis and local
-        cache_tts(text, audio_content)
+        # Cache in both Redis and local with language
+        cache_tts(f"{text}_{lang}", audio_content)
         await set_redis_cache(cache_key, base64.b64encode(audio_content).decode())
         
         return audio_content
@@ -356,10 +411,11 @@ async def speech_to_text(file: UploadFile = File(...)):
 async def text_to_speech(request: dict):
     try:
         text = request.get("text", "")
+        lang = request.get("language", "en")
         clean_text = clean_text_for_tts(text)
         optimized_text = optimize_text_for_tts(clean_text)
         
-        audio_content = await generate_tts_audio(optimized_text)
+        audio_content = await generate_tts_audio(optimized_text, lang)
         if not audio_content:
             raise HTTPException(status_code=500, detail="TTS generation failed")
         
@@ -476,12 +532,18 @@ async def process_realtime_audio(audio_data, websocket, session_id, bot_id="defa
             "session_id": session_id
         })
         
-        # STT processing
+        # STT processing with proper audio format handling
         audio_file = io.BytesIO(audio_data)
-        # Detect format and use appropriate extension
-        if len(audio_data) > 4 and audio_data[:4] == b'RIFF':
+        
+        # Detect audio format from data header
+        if audio_data[:4] == b'RIFF':
             audio_file.name = f"realtime_{session_id}.wav"
+        elif audio_data[:4] == b'OggS':
+            audio_file.name = f"realtime_{session_id}.ogg"
+        elif audio_data[:3] == b'ID3' or audio_data[:2] == b'\xff\xfb':
+            audio_file.name = f"realtime_{session_id}.mp3"
         else:
+            # Default to webm for WebSocket audio
             audio_file.name = f"realtime_{session_id}.webm"
         
         transcript = client.audio.transcriptions.create(
@@ -568,11 +630,8 @@ async def process_complete_audio(audio_data, websocket, session_id, bot_id="defa
         
         # STT processing
         audio_file = io.BytesIO(audio_data)
-        # Detect format and use appropriate extension
-        if len(audio_data) > 4 and audio_data[:4] == b'RIFF':
-            audio_file.name = f"session_{session_id}.wav"
-        else:
-            audio_file.name = f"session_{session_id}.webm"
+        # Always use .wav for WebSocket audio chunks
+        audio_file.name = f"session_{session_id}.wav"
         
         transcript = client.audio.transcriptions.create(
             model="whisper-1",
@@ -909,8 +968,8 @@ async def voice_chat(file: UploadFile = File(...), bot_id: str = "default"):
         audio_content = await generate_tts_audio(optimized_response, spoken_lang)
         
         if audio_content:
-            return StreamingResponse(
-                io.BytesIO(audio_content),
+            return Response(
+                content=audio_content,
                 media_type="audio/mpeg",
                 headers={
                     "X-Transcript": user_text,
