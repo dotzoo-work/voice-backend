@@ -148,6 +148,34 @@ def clean_text_for_tts(text):
     except Exception as e:
         print(f"Cleaning error: {e}")
         return "There was a text processing error."
+
+async def detect_language_hybrid(text):
+    """Hybrid language detection - FastText first, GPT fallback"""
+    if not text or len(text.strip()) < 3:
+        return "en"
+    
+    # Simple keyword-based detection for common languages
+    text_lower = text.lower()
+    
+    # Hindi/Devanagari detection
+    if any(ord(char) >= 0x0900 and ord(char) <= 0x097F for char in text):
+        return "hi"
+    
+    # Punjabi/Gurmukhi detection
+    if any(ord(char) >= 0x0A00 and ord(char) <= 0x0A7F for char in text):
+        return "pa"
+    
+    # Gujarati detection
+    if any(ord(char) >= 0x0A80 and ord(char) <= 0x0AFF for char in text):
+        return "gu"
+    
+    # Spanish keywords
+    spanish_words = ['hola', 'gracias', 'por favor', 'sí', 'no', 'buenos', 'días']
+    if any(word in text_lower for word in spanish_words):
+        return "es"
+    
+    # Default to English
+    return "en"
 async def get_chatbot_response(message: str, bot_id: str = "default"):
     """
     Call the chatbot backend API safely and return the response text.
@@ -551,14 +579,16 @@ async def process_realtime_audio(audio_data, websocket, session_id, bot_id="defa
         )
         
         user_text = getattr(transcript, 'text', '').strip()
-        spoken_lang = getattr(transcript, 'language', None)
+        
+        # Hybrid detection (FastText first, GPT fallback)
+        lang = await detect_language_hybrid(user_text)
         
         if user_text:
             # Send transcript immediately
             await websocket.send_json({
                 "type": "transcript",
                 "text": user_text,
-                "language": spoken_lang,
+                "language": lang,
                 "session_id": session_id
             })
             
@@ -575,8 +605,6 @@ async def process_realtime_audio(audio_data, websocket, session_id, bot_id="defa
             # Generate TTS with detected language
             clean_text = clean_text_for_tts(bot_response)
             optimized_text = optimize_text_for_tts(clean_text)
-            
-            lang = spoken_lang if spoken_lang else "en"
             audio_content = await generate_tts_audio(optimized_text, lang)
             
             if audio_content:
@@ -639,14 +667,14 @@ async def process_complete_audio(audio_data, websocket, session_id, bot_id="defa
         )
         
         user_text = getattr(transcript, 'text', '').strip()
-        spoken_lang = getattr(transcript, 'language', None)
+        lang = await detect_language_hybrid(user_text)
         
         if user_text:
             # Send transcript
             await websocket.send_json({
                 "type": "transcript",
                 "text": user_text,
-                "language": spoken_lang,
+                "language": lang,
                 "session_id": session_id
             })
             
@@ -663,8 +691,6 @@ async def process_complete_audio(audio_data, websocket, session_id, bot_id="defa
             # Generate TTS with detected language
             clean_text = clean_text_for_tts(bot_response)
             optimized_text = optimize_text_for_tts(clean_text)
-            
-            lang = spoken_lang if spoken_lang else "en"
             audio_content = await generate_tts_audio(optimized_text, lang)
             
             if audio_content:
@@ -751,8 +777,9 @@ async def process_chunk_response(text, websocket, chunk_id, bot_id="default"):
             "chunk_id": chunk_id
         })
         
-        # Generate TTS in background
-        asyncio.create_task(generate_chunk_tts(bot_response, websocket, chunk_id))
+        # detect language for the chunk's user text
+        lang = await detect_language_hybrid(text)
+        asyncio.create_task(generate_chunk_tts(bot_response, websocket, chunk_id, lang))
         
     except Exception as e:
         print(f"Chunk response error: {e}")
@@ -795,12 +822,12 @@ async def voice_stream_websocket(websocket: WebSocket, bot_id: str = "default"):
             )
             
             user_text = getattr(transcript, 'text', '').strip()
-            spoken_lang = getattr(transcript, 'language', None)
+            lang = await detect_language_hybrid(user_text)
             
             await websocket.send_json({
                 "type": "transcript",
                 "text": user_text,
-                "language": spoken_lang
+                "language": lang
             })
             
             # Ultra-fast parallel processing
@@ -815,7 +842,7 @@ async def voice_stream_websocket(websocket: WebSocket, bot_id: str = "default"):
             async def process_tts(bot_response):
                 clean_response = clean_text_for_tts(bot_response)
                 optimized_response = optimize_text_for_tts(clean_response)
-                await generate_tts_audio_streaming(optimized_response, websocket, spoken_lang)
+                await generate_tts_audio_streaming(optimized_response, websocket, lang)
                 await websocket.send_json({"type": "audio_complete"})
             
             # Start chat response immediately
@@ -848,12 +875,12 @@ async def voice_stream_legacy(websocket: WebSocket, bot_id: str = "default"):
             )
             
             user_text = getattr(transcript, 'text', '').strip()
-            spoken_lang = getattr(transcript, 'language', None)
+            lang = await detect_language_hybrid(user_text)
             
             await websocket.send_json({
                 "type": "transcript",
                 "text": user_text,
-                "language": spoken_lang
+                "language": lang
             })
             
             async def process_response():
@@ -867,7 +894,7 @@ async def voice_stream_legacy(websocket: WebSocket, bot_id: str = "default"):
                 clean_response = clean_text_for_tts(bot_response)
                 optimized_response = optimize_text_for_tts(clean_response)
                 
-                audio_content = await generate_tts_audio(optimized_response, spoken_lang)
+                audio_content = await generate_tts_audio(optimized_response, lang)
                 if audio_content:
                     audio_b64 = base64.b64encode(audio_content).decode()
                     await websocket.send_json({
@@ -949,11 +976,11 @@ async def voice_chat(file: UploadFile = File(...), bot_id: str = "default"):
         )
         
         user_text = getattr(transcript, 'text', '').strip()
-        spoken_lang = getattr(transcript, 'language', None)
+        lang = await detect_language_hybrid(user_text)
         if not user_text:
             user_text = "Hello"
         
-        print(f"User: {user_text} (Language: {spoken_lang})")
+        print(f"User: {user_text} (Language: {lang})")
         
         # Get chatbot response
         bot_response = await get_chatbot_response(user_text, bot_id)
@@ -965,7 +992,6 @@ async def voice_chat(file: UploadFile = File(...), bot_id: str = "default"):
         print(f"Bot optimized: {optimized_response}")
         
         # Generate TTS with detected language
-        lang = spoken_lang if spoken_lang else "en"
         audio_content = await generate_tts_audio(optimized_response, lang)
         
         if audio_content:
