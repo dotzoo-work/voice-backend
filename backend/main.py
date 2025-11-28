@@ -71,7 +71,7 @@ CHATBOT_URLS = {
 # Performance optimizations
 tts_cache = {}
 CACHE_MAX_SIZE = 100
-CACHE_TTL = 1296000  # 15 days
+CACHE_TTL = 86400  # 24 hours
 MAX_TTS_LENGTH = 2500
 
 # Connection pooling for faster API calls
@@ -148,7 +148,7 @@ def clean_text_for_tts(text):
     except Exception as e:
         print(f"Cleaning error: {e}")
         return "There was a text processing error."
-async def get_chatbot_response(message: str, bot_id: str = "default", lang: str = "en"):
+async def get_chatbot_response(message: str, bot_id: str = "default"):
     """
     Call the chatbot backend API safely and return the response text.
     """
@@ -156,13 +156,11 @@ async def get_chatbot_response(message: str, bot_id: str = "default", lang: str 
     chatbot_url = CHATBOT_URLS.get(bot_id, CHATBOT_URLS["default"])
     payload = {
         "message": message,
-        "bot_id": bot_id,
-        "language": lang
+        "bot_id": bot_id
     }
 
     print(f"📡 Sending message to chatbot API: {chatbot_url}")
     print(f"📦 Payload: {payload}")
-    print(f"🌍 Language being sent: {lang}")
 
     try:
         async with httpx.AsyncClient(timeout=httpx.Timeout(30.0, connect=10.0)) as client:
@@ -217,7 +215,7 @@ async def relay_message(request: RelayRequest):
     """Relay message to chatbot backend"""
     try:
         print(f"🔍 Relay request - Message: {request.message}, Language: {request.language}, Bot: {request.bot_id}")
-        response = await get_chatbot_response(request.message, request.bot_id, request.language)
+        response = await get_chatbot_response(request.message, request.bot_id)
         print(f"🔍 Relay response: {response}")
         return {"response": response, "bot_id": request.bot_id, "language": request.language}
     except Exception as e:
@@ -228,7 +226,7 @@ async def test_multilingual(message: str = "नमस्ते", bot_id: str = "
     """Test multilingual chatbot response"""
     try:
         print(f"🧪 Testing multilingual - Message: {message}, Language: {lang}")
-        response = await get_chatbot_response(message, bot_id, lang)
+        response = await get_chatbot_response(message, bot_id)
         print(f"🧪 Test response: {response}")
         return {
             "success": True,
@@ -442,16 +440,16 @@ async def voice_realtime_websocket(websocket: WebSocket, bot_id: str = "default"
         """Auto-stop recording after 3 seconds"""
         nonlocal is_recording, audio_buffer, session_id
         
-        await asyncio.sleep(3.0)
+        await asyncio.sleep(6.0)
         if is_recording:
-            print(f"Auto-stopping recording after 3 seconds")
+            print(f"Auto-stopping recording after 6 seconds")
             
             # Stop recording first
             is_recording = False
             
             await websocket.send_json({
                 "type": "recording_stopped",
-                "duration": 3.0,
+                "duration": 6.0,
                 "session_id": session_id,
                 "reason": "auto_stop"
             })
@@ -500,9 +498,9 @@ async def voice_realtime_websocket(websocket: WebSocket, bot_id: str = "default"
                 # Skip real-time chunk processing to avoid format issues
                 # Just accumulate audio for final processing
                 
-                # Check if we hit 3 seconds (backup check)
+                # Check if we hit 6 seconds (backup check)
                 recording_duration = current_time - recording_start_time
-                if recording_duration >= 3.0:
+                if recording_duration >= 6.0:
                     is_recording = False
                     if auto_stop_task:
                         auto_stop_task.cancel()
@@ -547,7 +545,7 @@ async def process_realtime_audio(audio_data, websocket, session_id, bot_id="defa
             audio_file.name = f"realtime_{session_id}.webm"
         
         transcript = client.audio.transcriptions.create(
-            model="whisper-1",
+            model="gpt-4o-transcribe",
             file=audio_file,
             response_format="verbose_json"
         )
@@ -564,8 +562,8 @@ async def process_realtime_audio(audio_data, websocket, session_id, bot_id="defa
                 "session_id": session_id
             })
             
-            # Get chatbot response with detected language
-            bot_response = await get_chatbot_response(user_text, bot_id, spoken_lang)
+            # Get chatbot response
+            bot_response = await get_chatbot_response(user_text, bot_id)
             
             # Send bot response
             await websocket.send_json({
@@ -578,7 +576,8 @@ async def process_realtime_audio(audio_data, websocket, session_id, bot_id="defa
             clean_text = clean_text_for_tts(bot_response)
             optimized_text = optimize_text_for_tts(clean_text)
             
-            audio_content = await generate_tts_audio(optimized_text, spoken_lang)
+            lang = spoken_lang if spoken_lang else "en"
+            audio_content = await generate_tts_audio(optimized_text, lang)
             
             if audio_content:
                 audio_b64 = base64.b64encode(audio_content).decode()
@@ -634,7 +633,7 @@ async def process_complete_audio(audio_data, websocket, session_id, bot_id="defa
         audio_file.name = f"session_{session_id}.wav"
         
         transcript = client.audio.transcriptions.create(
-            model="whisper-1",
+            model="gpt-4o-transcribe",
             file=audio_file,
             response_format="verbose_json"
         )
@@ -651,8 +650,8 @@ async def process_complete_audio(audio_data, websocket, session_id, bot_id="defa
                 "session_id": session_id
             })
             
-            # Get chatbot response with detected language
-            bot_response = await get_chatbot_response(user_text, bot_id, spoken_lang)
+            # Get chatbot response
+            bot_response = await get_chatbot_response(user_text, bot_id)
             
             # Send bot response
             await websocket.send_json({
@@ -665,7 +664,8 @@ async def process_complete_audio(audio_data, websocket, session_id, bot_id="defa
             clean_text = clean_text_for_tts(bot_response)
             optimized_text = optimize_text_for_tts(clean_text)
             
-            audio_content = await generate_tts_audio(optimized_text, spoken_lang)
+            lang = spoken_lang if spoken_lang else "en"
+            audio_content = await generate_tts_audio(optimized_text, lang)
             
             if audio_content:
                 audio_b64 = base64.b64encode(audio_content).decode()
@@ -712,7 +712,7 @@ async def process_audio_chunk(audio_data, websocket, chunk_id):
                 audio_file.name = f"chunk_{chunk_id}.webm"
         
         transcript = client.audio.transcriptions.create(
-            model="whisper-1",
+            model="gpt-4o-transcribe",
             file=audio_file,
             response_format="verbose_json"
         )
@@ -805,7 +805,7 @@ async def voice_stream_websocket(websocket: WebSocket, bot_id: str = "default"):
             
             # Ultra-fast parallel processing
             async def get_and_send_response():
-                bot_response = await get_chatbot_response(user_text, bot_id, spoken_lang)
+                bot_response = await get_chatbot_response(user_text, bot_id)
                 await websocket.send_json({
                     "type": "bot_response",
                     "text": bot_response
@@ -857,7 +857,7 @@ async def voice_stream_legacy(websocket: WebSocket, bot_id: str = "default"):
             })
             
             async def process_response():
-                bot_response = await get_chatbot_response(user_text, bot_id, spoken_lang)
+                bot_response = await get_chatbot_response(user_text, bot_id)
                 
                 await websocket.send_json({
                     "type": "bot_response",
@@ -955,8 +955,8 @@ async def voice_chat(file: UploadFile = File(...), bot_id: str = "default"):
         
         print(f"User: {user_text} (Language: {spoken_lang})")
         
-        # Get chatbot response with detected language
-        bot_response = await get_chatbot_response(user_text, bot_id, spoken_lang)
+        # Get chatbot response
+        bot_response = await get_chatbot_response(user_text, bot_id)
         print(f"Bot original: {bot_response}")
         
         # Clean and optimize response
@@ -965,7 +965,8 @@ async def voice_chat(file: UploadFile = File(...), bot_id: str = "default"):
         print(f"Bot optimized: {optimized_response}")
         
         # Generate TTS with detected language
-        audio_content = await generate_tts_audio(optimized_response, spoken_lang)
+        lang = spoken_lang if spoken_lang else "en"
+        audio_content = await generate_tts_audio(optimized_response, lang)
         
         if audio_content:
             return Response(
@@ -1006,7 +1007,7 @@ async def root():
         "optimizations": {
             "tts_cache": f"{len(tts_cache)} items cached",
             "max_tts_length": MAX_TTS_LENGTH,
-            "cache_ttl": "15 days"
+            "cache_ttl": "24 hours"
         },
         "endpoints": {
             "voice_realtime": "/ws/voice-realtime (Real-time Processing)",
