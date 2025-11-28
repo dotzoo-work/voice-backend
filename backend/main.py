@@ -399,8 +399,8 @@ async def speech_to_text(file: UploadFile = File(...)):
         )
         
         return {
-            "text": transcript.text,
-            "language": transcript.language
+            "text": transcript.get("text", ""),
+            "language": transcript.get("language", None)
         }
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"STT failed: {str(e)}")
@@ -550,8 +550,8 @@ async def process_realtime_audio(audio_data, websocket, session_id, bot_id="defa
             response_format="json"
         )
         
-        user_text = transcript.text.strip()
-        spoken_lang = transcript.language
+        user_text = transcript.get("text", "").strip()
+        spoken_lang = transcript.get("language", None)
         
         if user_text:
             # Send transcript immediately
@@ -638,8 +638,8 @@ async def process_complete_audio(audio_data, websocket, session_id, bot_id="defa
             response_format="json"
         )
         
-        user_text = transcript.text.strip()
-        spoken_lang = transcript.language
+        user_text = transcript.get("text", "").strip()
+        spoken_lang = transcript.get("language", None)
         
         if user_text:
             # Send transcript
@@ -794,8 +794,8 @@ async def voice_stream_websocket(websocket: WebSocket, bot_id: str = "default"):
                 response_format="json"
             )
             
-            user_text = transcript.text
-            spoken_lang = transcript.language
+            user_text = transcript.get("text", "").strip()
+            spoken_lang = transcript.get("language", None)
             
             await websocket.send_json({
                 "type": "transcript",
@@ -847,8 +847,8 @@ async def voice_stream_legacy(websocket: WebSocket, bot_id: str = "default"):
                 response_format="json"
             )
             
-            user_text = transcript.text
-            spoken_lang = transcript.language
+            user_text = transcript.get("text", "").strip()
+            spoken_lang = transcript.get("language", None)
             
             await websocket.send_json({
                 "type": "transcript",
@@ -948,8 +948,8 @@ async def voice_chat(file: UploadFile = File(...), bot_id: str = "default"):
             response_format="json"
         )
         
-        user_text = transcript.text.strip()
-        spoken_lang = transcript.language
+        user_text = transcript.get("text", "").strip()
+        spoken_lang = transcript.get("language", None)
         if not user_text:
             user_text = "Hello"
         
