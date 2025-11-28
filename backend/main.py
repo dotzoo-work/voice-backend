@@ -395,7 +395,7 @@ async def speech_to_text(file: UploadFile = File(...)):
         transcript = client.audio.transcriptions.create(
             model="gpt-4o-transcribe",
             file=audio_file,
-            response_format="verbose_json"
+            response_format="json"
         )
         
         return {
@@ -547,7 +547,7 @@ async def process_realtime_audio(audio_data, websocket, session_id, bot_id="defa
         transcript = client.audio.transcriptions.create(
             model="gpt-4o-transcribe",
             file=audio_file,
-            response_format="verbose_json"
+            response_format="json"
         )
         
         user_text = transcript.text.strip()
@@ -635,7 +635,7 @@ async def process_complete_audio(audio_data, websocket, session_id, bot_id="defa
         transcript = client.audio.transcriptions.create(
             model="gpt-4o-transcribe",
             file=audio_file,
-            response_format="verbose_json"
+            response_format="json"
         )
         
         user_text = transcript.text.strip()
@@ -714,7 +714,7 @@ async def process_audio_chunk(audio_data, websocket, chunk_id):
         transcript = client.audio.transcriptions.create(
             model="gpt-4o-transcribe",
             file=audio_file,
-            response_format="verbose_json"
+            response_format="json"
         )
         
         # Handle both text response and object response
@@ -791,7 +791,7 @@ async def voice_stream_websocket(websocket: WebSocket, bot_id: str = "default"):
             transcript = client.audio.transcriptions.create(
                 model="gpt-4o-transcribe",
                 file=audio_file,
-                response_format="verbose_json"
+                response_format="json"
             )
             
             user_text = transcript.text
@@ -844,7 +844,7 @@ async def voice_stream_legacy(websocket: WebSocket, bot_id: str = "default"):
             transcript = client.audio.transcriptions.create(
                 model="gpt-4o-transcribe",
                 file=audio_file,
-                response_format="verbose_json"
+                response_format="json"
             )
             
             user_text = transcript.text
@@ -945,7 +945,7 @@ async def voice_chat(file: UploadFile = File(...), bot_id: str = "default"):
         transcript = client.audio.transcriptions.create(
             model="gpt-4o-transcribe",
             file=audio_file,
-            response_format="verbose_json"
+            response_format="json"
         )
         
         user_text = transcript.text.strip()
