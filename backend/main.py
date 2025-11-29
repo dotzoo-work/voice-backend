@@ -27,24 +27,6 @@ import hashlib
 import time
 # import redis.asyncio as redis  # Commented out for now
 
-# ✅ FIX 1: Force-Hindi Script Normalizer
-try:
-    from indic_transliteration import sanscript
-    from indic_transliteration.sanscript import transliterate
-except ImportError:
-    sanscript = None
-    transliterate = None
-
-def fix_urdu_to_hindi(text):
-    try:
-        # Urdu/Arabic chars range check
-        if any(0x0600 <= ord(ch) <= 0x06FF for ch in text):
-            if transliterate:
-                return transliterate(text, sanscript.URDU, sanscript.DEVANAGARI)
-    except:
-        pass
-    return text
-
 load_dotenv()
 
 # ⭐ STEP 1 — Only 6 allowed languages
@@ -54,6 +36,13 @@ def normalize_lang(lang):
     if lang not in ALLOWED_LANGUAGES:
         return "en"
     return lang
+
+# ⭐ STEP 1 — Force allowed language function
+def force_allowed_language(detected):
+    allowed = ["hi", "pa", "gu", "es", "ku", "en"]
+    if detected in allowed:
+        return detected
+    return "en"   # default English
 
 app = FastAPI(title="Voice Backend Service")
 
@@ -179,10 +168,6 @@ def clean_text_for_tts(text):
 async def detect_language(text):
     if not text or len(text.strip()) < 2:
         return "en"
-    
-    # ✅ FIX 2: Force Hindi/Urdu recognition
-    if any(0x0600 <= ord(ch) <= 0x06FF for ch in text):
-        return "hi"
     
     # Hindi (Devanagari)
     if any(0x0900 <= ord(ch) <= 0x097F for ch in text):
@@ -348,11 +333,11 @@ async def generate_single_tts_chunk(chunk, chunk_index, lang="en"):
     try:
         # ⭐ STEP 4 — Fixed voice map (only 6 languages)
         voice_map = {
-            "hi": "nova",
-            "pa": "nova",
-            "gu": "nova",
-            "es": "nova",
-            "ku": "nova",
+            "hi": "alloy",
+            "pa": "alloy",
+            "gu": "alloy",
+            "es": "verse",
+            "ku": "alloy",
             "en": "alloy",
         }
         voice = voice_map.get(lang.lower(), "alloy")
@@ -419,11 +404,11 @@ async def generate_tts_audio(text, lang="en"):
     try:
         # ⭐ STEP 4 — Fixed voice map (only 6 languages)
         voice_map = {
-            "hi": "nova",
-            "pa": "nova",
-            "gu": "nova",
-            "es": "nova",
-            "ku": "nova",
+            "hi": "alloy",
+            "pa": "alloy",
+            "gu": "alloy",
+            "es": "verse",
+            "ku": "alloy",
             "en": "alloy",
         }
         voice = voice_map.get(lang.lower(), "alloy")
@@ -453,9 +438,10 @@ async def speech_to_text(file: UploadFile = File(...)):
         audio_file.name = "audio.wav"
         
         transcript = client.audio.transcriptions.create(
-            model="gpt-4o-transcribe",
+            model="whisper-1",
             file=audio_file,
-            response_format="json"
+            response_format="json",
+            language="en"   # default English
         )
         
         return {
@@ -604,18 +590,19 @@ async def process_realtime_audio(audio_data, websocket, session_id, bot_id="defa
             # Default to webm for WebSocket audio
             audio_file.name = f"realtime_{session_id}.webm"
         
+        # Whisper Forced Language STT
         transcript = client.audio.transcriptions.create(
-            model="gpt-4o-transcribe",
+            model="whisper-1",
             file=audio_file,
-            response_format="json"
+            response_format="json",
+            language="en"   # default English
         )
         
         user_text = getattr(transcript, 'text', '').strip()
-        user_text = fix_urdu_to_hindi(user_text)
         
         # Ultra-accurate language detection
-        lang = await detect_language(user_text)
-        lang = normalize_lang(lang)
+        detected = await detect_language(user_text)
+        lang = force_allowed_language(detected)
         
         if user_text:
             # Send transcript immediately
@@ -695,15 +682,15 @@ async def process_complete_audio(audio_data, websocket, session_id, bot_id="defa
         audio_file.name = f"session_{session_id}.wav"
         
         transcript = client.audio.transcriptions.create(
-            model="gpt-4o-transcribe",
+            model="whisper-1",
             file=audio_file,
-            response_format="json"
+            response_format="json",
+            language="en"   # default English
         )
         
         user_text = getattr(transcript, 'text', '').strip()
-        user_text = fix_urdu_to_hindi(user_text)
-        lang = await detect_language(user_text)
-        lang = normalize_lang(lang)
+        detected = await detect_language(user_text)
+        lang = force_allowed_language(detected)
         
         if user_text:
             # Send transcript
@@ -774,9 +761,10 @@ async def process_audio_chunk(audio_data, websocket, chunk_id):
                 audio_file.name = f"chunk_{chunk_id}.webm"
         
         transcript = client.audio.transcriptions.create(
-            model="gpt-4o-transcribe",
+            model="whisper-1",
             file=audio_file,
-            response_format="json"
+            response_format="json",
+            language="hi"   # default Hindi
         )
         
         # Handle both text response and object response
@@ -804,8 +792,8 @@ async def process_chunk_response(text, websocket, chunk_id, bot_id="default"):
     """Process chatbot response for chunk"""
     try:
         # Get bot response with language
-        lang = await detect_language(text)
-        lang = normalize_lang(lang)
+        detected = await detect_language(text)
+        lang = force_allowed_language(detected)
         bot_response = await get_chatbot_response(text, bot_id, lang)
         
         # Send response immediately
@@ -852,15 +840,15 @@ async def voice_stream_websocket(websocket: WebSocket, bot_id: str = "default"):
             
             # STT with high accuracy language detection
             transcript = client.audio.transcriptions.create(
-                model="gpt-4o-transcribe",
+                model="whisper-1",
                 file=audio_file,
-                response_format="json"
+                response_format="json",
+                language="en"   # default English
             )
             
             user_text = getattr(transcript, 'text', '').strip()
-            user_text = fix_urdu_to_hindi(user_text)
-            lang = await detect_language(user_text)
-            lang = normalize_lang(lang)
+            detected = await detect_language(user_text)
+            lang = force_allowed_language(detected)
             
             await websocket.send_json({
                 "type": "transcript",
@@ -907,15 +895,15 @@ async def voice_stream_legacy(websocket: WebSocket, bot_id: str = "default"):
             audio_file.name = "stream.wav"
             
             transcript = client.audio.transcriptions.create(
-                model="gpt-4o-transcribe",
+                model="whisper-1",
                 file=audio_file,
-                response_format="json"
+                response_format="json",
+                language="en"   # default English
             )
             
             user_text = getattr(transcript, 'text', '').strip()
-            user_text = fix_urdu_to_hindi(user_text)
-            lang = await detect_language(user_text)
-            lang = normalize_lang(lang)
+            detected = await detect_language(user_text)
+            lang = force_allowed_language(detected)
             
             await websocket.send_json({
                 "type": "transcript",
@@ -1010,15 +998,15 @@ async def voice_chat(file: UploadFile = File(...), bot_id: str = "default"):
         audio_file.name = "audio.wav"
         
         transcript = client.audio.transcriptions.create(
-            model="gpt-4o-transcribe",
+            model="whisper-1",
             file=audio_file,
-            response_format="json"
+            response_format="json",
+            language="en"   # default English
         )
         
         user_text = getattr(transcript, 'text', '').strip()
-        user_text = fix_urdu_to_hindi(user_text)
-        lang = await detect_language(user_text)
-        lang = normalize_lang(lang)
+        detected = await detect_language(user_text)
+        lang = force_allowed_language(detected)
         if not user_text:
             user_text = "Hello"
         
