@@ -39,10 +39,11 @@ def normalize_lang(lang):
 
 # ⭐ STEP 1 — Force allowed language function
 def force_allowed_language(detected):
-    allowed = ["hi", "pa", "gu", "es", "ku", "en"]
+    allowed = ALLOWED_LANGUAGES  # use the central list
     if detected in allowed:
         return detected
-    return "hi"   # default Hindi
+    # sensible fallback to English if detection failed
+    return "en"
 
 app = FastAPI(title="Voice Backend Service")
 
@@ -262,7 +263,7 @@ async def relay_message(request: RelayRequest):
     """Relay message to chatbot backend"""
     try:
         print(f"🔍 Relay request - Message: {request.message}, Language: {request.language}, Bot: {request.bot_id}")
-        response = await get_chatbot_response(request.message, request.bot_id)
+        response = await get_chatbot_response(request.message, request.bot_id, request.language)
         print(f"🔍 Relay response: {response}")
         return {"response": response, "bot_id": request.bot_id, "language": request.language}
     except Exception as e:
@@ -273,7 +274,7 @@ async def test_multilingual(message: str = "नमस्ते", bot_id: str = "
     """Test multilingual chatbot response"""
     try:
         print(f"🧪 Testing multilingual - Message: {message}, Language: {lang}")
-        response = await get_chatbot_response(message, bot_id)
+        response = await get_chatbot_response(message, bot_id, lang)
         print(f"🧪 Test response: {response}")
         return {
             "success": True,
@@ -440,8 +441,7 @@ async def speech_to_text(file: UploadFile = File(...)):
         transcript = client.audio.transcriptions.create(
             model="whisper-1",
             file=audio_file,
-            response_format="json",
-            language="hi"   # default Hindi
+            response_format="json"
         )
         
         return {
@@ -613,8 +613,8 @@ async def process_realtime_audio(audio_data, websocket, session_id, bot_id="defa
                 "session_id": session_id
             })
             
-            # Get chatbot response
-            bot_response = await get_chatbot_response(user_text, bot_id)
+            # Get chatbot response with language
+            bot_response = await get_chatbot_response(user_text, bot_id, lang)
             
             # Send bot response
             await websocket.send_json({
@@ -953,8 +953,10 @@ async def websocket_bot_endpoint_old(websocket: WebSocket, bot_id: str = "defaul
             if data.get("type") == "message":
                 message = data.get("message", "")
                 
-                # Get chatbot response
-                response_text = await get_chatbot_response(message, bot_id)
+                # Detect language and get chatbot response
+                detected = await detect_language(message)
+                lang = force_allowed_language(detected)
+                response_text = await get_chatbot_response(message, bot_id, lang)
                 
                 # Send text response
                 await websocket.send_json({
