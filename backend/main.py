@@ -438,7 +438,8 @@ async def speech_to_text(file: UploadFile = File(...)):
         audio_file = io.BytesIO(audio_data)
         audio_file.name = "audio.wav"
         
-        transcript = client.audio.transcriptions.create(
+        transcript = await asyncio.to_thread(
+            client.audio.transcriptions.create,
             model="whisper-1",
             file=audio_file,
             response_format="json"
@@ -483,7 +484,7 @@ async def voice_realtime_websocket(websocket: WebSocket, bot_id: str = "default"
     auto_stop_task = None
     
     async def auto_stop_recording():
-        """Auto-stop recording after 3 seconds"""
+        """⭐ SOLUTION 2 — Single auto-stop (no duplicates)"""
         nonlocal is_recording, audio_buffer, session_id
         
         await asyncio.sleep(6.0)
@@ -502,15 +503,9 @@ async def voice_realtime_websocket(websocket: WebSocket, bot_id: str = "default"
             
             # Process complete audio recording
             if len(audio_buffer) > 0:
-                asyncio.create_task(process_realtime_audio(
+                await process_realtime_audio(
                     audio_buffer, websocket, session_id, bot_id
-                ))
-            
-            # Send ready signal
-            await websocket.send_json({
-                "type": "ready_for_next",
-                "session_id": session_id
-            })
+                )
             
             # Reset for next recording
             audio_buffer = b""
@@ -570,8 +565,9 @@ async def process_realtime_audio(audio_data, websocket, session_id, bot_id="defa
             # Default to webm for WebSocket audio
             audio_file.name = f"realtime_{session_id}.webm"
         
-        # Fast STT processing
-        transcript = client.audio.transcriptions.create(
+        # ⭐ SOLUTION 1 — Async Whisper (non-blocking)
+        transcript = await asyncio.to_thread(
+            client.audio.transcriptions.create,
             model="whisper-1",
             file=audio_file,
             response_format="json"
@@ -614,18 +610,18 @@ async def process_realtime_audio(audio_data, websocket, session_id, bot_id="defa
                     "data": audio_b64,
                     "session_id": session_id
                 })
-                
-                # After audio_response has fully sent
-                await websocket.send_json({
-                    "type": "processing_complete",
-                    "session_id": session_id
-                })
+            
+            # ⭐ SOLUTION 4 — Correct message order
+            await websocket.send_json({
+                "type": "processing_complete",
+                "session_id": session_id
+            })
 
-                # Send ready only after TTS is done
-                await websocket.send_json({
-                    "type": "ready_for_next",
-                    "session_id": session_id
-                })
+            # Send ready_for_next ONLY at the very end
+            await websocket.send_json({
+                "type": "ready_for_next",
+                "session_id": session_id
+            })
         else:
             await websocket.send_json({
                 "type": "no_speech_detected",
@@ -671,7 +667,8 @@ async def process_complete_audio(audio_data, websocket, session_id, bot_id="defa
         # Always use .wav for WebSocket audio chunks
         audio_file.name = f"session_{session_id}.wav"
         
-        transcript = client.audio.transcriptions.create(
+        transcript = await asyncio.to_thread(
+            client.audio.transcriptions.create,
             model="whisper-1",
             file=audio_file,
             response_format="json",
@@ -829,7 +826,8 @@ async def voice_stream_websocket(websocket: WebSocket, bot_id: str = "default"):
             audio_file.name = "stream.wav"
             
             # STT with high accuracy language detection
-            transcript = client.audio.transcriptions.create(
+            transcript = await asyncio.to_thread(
+                client.audio.transcriptions.create,
                 model="whisper-1",
                 file=audio_file,
                 response_format="json",
@@ -884,7 +882,8 @@ async def voice_stream_legacy(websocket: WebSocket, bot_id: str = "default"):
             audio_file = io.BytesIO(data)
             audio_file.name = "stream.wav"
             
-            transcript = client.audio.transcriptions.create(
+            transcript = await asyncio.to_thread(
+                client.audio.transcriptions.create,
                 model="whisper-1",
                 file=audio_file,
                 response_format="json",
@@ -989,7 +988,8 @@ async def voice_chat(file: UploadFile = File(...), bot_id: str = "default"):
         audio_file = io.BytesIO(audio_data)
         audio_file.name = "audio.wav"
         
-        transcript = client.audio.transcriptions.create(
+        transcript = await asyncio.to_thread(
+            client.audio.transcriptions.create,
             model="whisper-1",
             file=audio_file,
             response_format="json",
