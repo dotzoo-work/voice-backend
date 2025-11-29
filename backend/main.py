@@ -27,6 +27,24 @@ import hashlib
 import time
 # import redis.asyncio as redis  # Commented out for now
 
+# ✅ FIX 1: Force-Hindi Script Normalizer
+try:
+    from indic_transliteration import sanscript
+    from indic_transliteration.sanscript import transliterate
+except ImportError:
+    sanscript = None
+    transliterate = None
+
+def fix_urdu_to_hindi(text):
+    try:
+        # Urdu/Arabic chars range check
+        if any(0x0600 <= ord(ch) <= 0x06FF for ch in text):
+            if transliterate:
+                return transliterate(text, sanscript.URDU, sanscript.DEVANAGARI)
+    except:
+        pass
+    return text
+
 load_dotenv()
 
 # ⭐ STEP 1 — Only 6 allowed languages
@@ -161,6 +179,10 @@ def clean_text_for_tts(text):
 async def detect_language(text):
     if not text or len(text.strip()) < 2:
         return "en"
+    
+    # ✅ FIX 2: Force Hindi/Urdu recognition
+    if any(0x0600 <= ord(ch) <= 0x06FF for ch in text):
+        return "hi"
     
     # Hindi (Devanagari)
     if any(0x0900 <= ord(ch) <= 0x097F for ch in text):
@@ -589,6 +611,7 @@ async def process_realtime_audio(audio_data, websocket, session_id, bot_id="defa
         )
         
         user_text = getattr(transcript, 'text', '').strip()
+        user_text = fix_urdu_to_hindi(user_text)
         
         # Ultra-accurate language detection
         lang = await detect_language(user_text)
@@ -678,6 +701,7 @@ async def process_complete_audio(audio_data, websocket, session_id, bot_id="defa
         )
         
         user_text = getattr(transcript, 'text', '').strip()
+        user_text = fix_urdu_to_hindi(user_text)
         lang = await detect_language(user_text)
         lang = normalize_lang(lang)
         
@@ -834,6 +858,7 @@ async def voice_stream_websocket(websocket: WebSocket, bot_id: str = "default"):
             )
             
             user_text = getattr(transcript, 'text', '').strip()
+            user_text = fix_urdu_to_hindi(user_text)
             lang = await detect_language(user_text)
             lang = normalize_lang(lang)
             
@@ -888,6 +913,7 @@ async def voice_stream_legacy(websocket: WebSocket, bot_id: str = "default"):
             )
             
             user_text = getattr(transcript, 'text', '').strip()
+            user_text = fix_urdu_to_hindi(user_text)
             lang = await detect_language(user_text)
             lang = normalize_lang(lang)
             
@@ -990,6 +1016,7 @@ async def voice_chat(file: UploadFile = File(...), bot_id: str = "default"):
         )
         
         user_text = getattr(transcript, 'text', '').strip()
+        user_text = fix_urdu_to_hindi(user_text)
         lang = await detect_language(user_text)
         lang = normalize_lang(lang)
         if not user_text:
