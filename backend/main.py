@@ -334,9 +334,9 @@ async def generate_single_tts_chunk(chunk, chunk_index, lang="en"):
     try:
         # ⭐ STEP 4 — Fixed voice map (only 6 languages)
         voice_map = {
-            "hi": "alloy",
-            "pa": "alloy",
-            "gu": "alloy",
+            "hi": "verse",
+            "pa": "verse",
+            "gu": "verse",
             "es": "verse",
             "ku": "alloy",
             "en": "alloy",
@@ -405,9 +405,9 @@ async def generate_tts_audio(text, lang="en"):
     try:
         # ⭐ STEP 4 — Fixed voice map (only 6 languages)
         voice_map = {
-            "hi": "alloy",
-            "pa": "alloy",
-            "gu": "alloy",
+            "hi": "verse",
+            "pa": "verse",
+            "gu": "verse",
             "es": "verse",
             "ku": "alloy",
             "en": "alloy",
