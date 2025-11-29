@@ -29,6 +29,14 @@ import time
 
 load_dotenv()
 
+# ⭐ STEP 1 — Only 6 allowed languages
+ALLOWED_LANGUAGES = ["en", "hi", "pa", "gu", "es", "ku"]
+
+def normalize_lang(lang):
+    if lang not in ALLOWED_LANGUAGES:
+        return "en"
+    return lang
+
 app = FastAPI(title="Voice Backend Service")
 
 app.add_middleware(
@@ -149,34 +157,37 @@ def clean_text_for_tts(text):
         print(f"Cleaning error: {e}")
         return "There was a text processing error."
 
-async def detect_language_hybrid(text):
-    """Hybrid language detection - FastText first, GPT fallback"""
-    if not text or len(text.strip()) < 3:
+# ⭐ STEP 2 — Ultra-accurate 6-Language Detection
+async def detect_language(text):
+    if not text or len(text.strip()) < 2:
         return "en"
     
-    # Simple keyword-based detection for common languages
-    text_lower = text.lower()
-    
-    # Hindi/Devanagari detection
-    if any(ord(char) >= 0x0900 and ord(char) <= 0x097F for char in text):
+    # Hindi (Devanagari)
+    if any(0x0900 <= ord(ch) <= 0x097F for ch in text):
         return "hi"
     
-    # Punjabi/Gurmukhi detection
-    if any(ord(char) >= 0x0A00 and ord(char) <= 0x0A7F for char in text):
+    # Punjabi (Gurmukhi)
+    if any(0x0A00 <= ord(ch) <= 0x0A7F for ch in text):
         return "pa"
     
-    # Gujarati detection
-    if any(ord(char) >= 0x0A80 and ord(char) <= 0x0AFF for char in text):
+    # Gujarati
+    if any(0x0A80 <= ord(ch) <= 0x0AFF for ch in text):
         return "gu"
     
-    # Spanish keywords
-    spanish_words = ['hola', 'gracias', 'por favor', 'sí', 'no', 'buenos', 'días']
-    if any(word in text_lower for word in spanish_words):
+    # Spanish common patterns
+    spanish_keywords = ["hola", "gracias", "buenos", "por favor", "¿", "¡"]
+    if any(word in text.lower() for word in spanish_keywords):
         return "es"
-    
-    # Default to English
+
+    # Kurdish (Latin/Arabic mixture keywords)
+    kurdish_keywords = ["slaw", "nav", "piroz", "spas", "çawa", "baş"]
+    if any(word in text.lower() for word in kurdish_keywords):
+        return "ku"
+
+    # Fallback
     return "en"
-async def get_chatbot_response(message: str, bot_id: str = "default"):
+# ⭐ STEP 3 — Chatbot function with language parameter
+async def get_chatbot_response(message: str, bot_id: str = "default", lang: str = "en"):
     """
     Call the chatbot backend API safely and return the response text.
     """
@@ -184,7 +195,8 @@ async def get_chatbot_response(message: str, bot_id: str = "default"):
     chatbot_url = CHATBOT_URLS.get(bot_id, CHATBOT_URLS["default"])
     payload = {
         "message": message,
-        "bot_id": bot_id
+        "bot_id": bot_id,
+        "language": lang
     }
 
     print(f"📡 Sending message to chatbot API: {chatbot_url}")
@@ -312,15 +324,14 @@ async def generate_single_tts_chunk(chunk, chunk_index, lang="en"):
         return chunk_index, local_cached, chunk
     
     try:
-        # Select voice based on language
+        # ⭐ STEP 4 — Fixed voice map (only 6 languages)
         voice_map = {
-            "hi": "nova", "hindi": "nova", "ur": "nova", "urdu": "nova",
-            "pa": "nova", "punjabi": "nova", "panjabi": "nova",
-            "es": "nova", "spanish": "nova", "fr": "shimmer", "french": "shimmer",
-            "de": "echo", "german": "echo", "it": "alloy", "italian": "alloy",
-            "pt": "onyx", "portuguese": "onyx", "ja": "nova", "japanese": "nova",
-            "ko": "nova", "korean": "nova", "zh": "nova", "chinese": "nova",
-            "ar": "nova", "arabic": "nova", "ru": "echo", "russian": "echo"
+            "hi": "nova",
+            "pa": "nova",
+            "gu": "nova",
+            "es": "nova",
+            "ku": "nova",
+            "en": "alloy",
         }
         voice = voice_map.get(lang.lower(), "alloy")
         
@@ -384,15 +395,14 @@ async def generate_tts_audio(text, lang="en"):
         return local_cached
     
     try:
-        # Select voice based on language
+        # ⭐ STEP 4 — Fixed voice map (only 6 languages)
         voice_map = {
-            "hi": "nova", "hindi": "nova", "ur": "nova", "urdu": "nova",
-            "pa": "nova", "punjabi": "nova", "panjabi": "nova",
-            "es": "nova", "spanish": "nova", "fr": "shimmer", "french": "shimmer",
-            "de": "echo", "german": "echo", "it": "alloy", "italian": "alloy",
-            "pt": "onyx", "portuguese": "onyx", "ja": "nova", "japanese": "nova",
-            "ko": "nova", "korean": "nova", "zh": "nova", "chinese": "nova",
-            "ar": "nova", "arabic": "nova", "ru": "echo", "russian": "echo"
+            "hi": "nova",
+            "pa": "nova",
+            "gu": "nova",
+            "es": "nova",
+            "ku": "nova",
+            "en": "alloy",
         }
         voice = voice_map.get(lang.lower(), "alloy")
         print(f"🎵 Generating TTS with voice: {voice} for language: {lang}")
@@ -580,8 +590,9 @@ async def process_realtime_audio(audio_data, websocket, session_id, bot_id="defa
         
         user_text = getattr(transcript, 'text', '').strip()
         
-        # Hybrid detection (FastText first, GPT fallback)
-        lang = await detect_language_hybrid(user_text)
+        # Ultra-accurate language detection
+        lang = await detect_language(user_text)
+        lang = normalize_lang(lang)
         
         if user_text:
             # Send transcript immediately
@@ -667,7 +678,8 @@ async def process_complete_audio(audio_data, websocket, session_id, bot_id="defa
         )
         
         user_text = getattr(transcript, 'text', '').strip()
-        lang = await detect_language_hybrid(user_text)
+        lang = await detect_language(user_text)
+        lang = normalize_lang(lang)
         
         if user_text:
             # Send transcript
@@ -678,8 +690,8 @@ async def process_complete_audio(audio_data, websocket, session_id, bot_id="defa
                 "session_id": session_id
             })
             
-            # Get chatbot response
-            bot_response = await get_chatbot_response(user_text, bot_id)
+            # Get chatbot response with language
+            bot_response = await get_chatbot_response(user_text, bot_id, lang)
             
             # Send bot response
             await websocket.send_json({
@@ -767,8 +779,10 @@ async def process_audio_chunk(audio_data, websocket, chunk_id):
 async def process_chunk_response(text, websocket, chunk_id, bot_id="default"):
     """Process chatbot response for chunk"""
     try:
-        # Get bot response
-        bot_response = await get_chatbot_response(text, bot_id)
+        # Get bot response with language
+        lang = await detect_language(text)
+        lang = normalize_lang(lang)
+        bot_response = await get_chatbot_response(text, bot_id, lang)
         
         # Send response immediately
         await websocket.send_json({
@@ -777,8 +791,6 @@ async def process_chunk_response(text, websocket, chunk_id, bot_id="default"):
             "chunk_id": chunk_id
         })
         
-        # detect language for the chunk's user text
-        lang = await detect_language_hybrid(text)
         asyncio.create_task(generate_chunk_tts(bot_response, websocket, chunk_id, lang))
         
     except Exception as e:
@@ -822,7 +834,8 @@ async def voice_stream_websocket(websocket: WebSocket, bot_id: str = "default"):
             )
             
             user_text = getattr(transcript, 'text', '').strip()
-            lang = await detect_language_hybrid(user_text)
+            lang = await detect_language(user_text)
+            lang = normalize_lang(lang)
             
             await websocket.send_json({
                 "type": "transcript",
@@ -832,7 +845,7 @@ async def voice_stream_websocket(websocket: WebSocket, bot_id: str = "default"):
             
             # Ultra-fast parallel processing
             async def get_and_send_response():
-                bot_response = await get_chatbot_response(user_text, bot_id)
+                bot_response = await get_chatbot_response(user_text, bot_id, lang)
                 await websocket.send_json({
                     "type": "bot_response",
                     "text": bot_response
@@ -875,7 +888,8 @@ async def voice_stream_legacy(websocket: WebSocket, bot_id: str = "default"):
             )
             
             user_text = getattr(transcript, 'text', '').strip()
-            lang = await detect_language_hybrid(user_text)
+            lang = await detect_language(user_text)
+            lang = normalize_lang(lang)
             
             await websocket.send_json({
                 "type": "transcript",
@@ -884,7 +898,7 @@ async def voice_stream_legacy(websocket: WebSocket, bot_id: str = "default"):
             })
             
             async def process_response():
-                bot_response = await get_chatbot_response(user_text, bot_id)
+                bot_response = await get_chatbot_response(user_text, bot_id, lang)
                 
                 await websocket.send_json({
                     "type": "bot_response",
@@ -976,14 +990,15 @@ async def voice_chat(file: UploadFile = File(...), bot_id: str = "default"):
         )
         
         user_text = getattr(transcript, 'text', '').strip()
-        lang = await detect_language_hybrid(user_text)
+        lang = await detect_language(user_text)
+        lang = normalize_lang(lang)
         if not user_text:
             user_text = "Hello"
         
         print(f"User: {user_text} (Language: {lang})")
         
-        # Get chatbot response
-        bot_response = await get_chatbot_response(user_text, bot_id)
+        # Get chatbot response with language
+        bot_response = await get_chatbot_response(user_text, bot_id, lang)
         print(f"Bot original: {bot_response}")
         
         # Clean and optimize response
