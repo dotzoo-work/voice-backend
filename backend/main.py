@@ -42,7 +42,7 @@ def force_allowed_language(detected):
     allowed = ["hi", "pa", "gu", "es", "ku", "en"]
     if detected in allowed:
         return detected
-    return "en"   # default English
+    return "hi"   # default Hindi
 
 app = FastAPI(title="Voice Backend Service")
 
@@ -441,7 +441,7 @@ async def speech_to_text(file: UploadFile = File(...)):
             model="whisper-1",
             file=audio_file,
             response_format="json",
-            language="en"   # default English
+            language="hi"   # default Hindi
         )
         
         return {
@@ -595,7 +595,7 @@ async def process_realtime_audio(audio_data, websocket, session_id, bot_id="defa
             model="whisper-1",
             file=audio_file,
             response_format="json",
-            language="en"   # default English
+            language="hi"   # default Hindi
         )
         
         user_text = getattr(transcript, 'text', '').strip()
@@ -685,7 +685,7 @@ async def process_complete_audio(audio_data, websocket, session_id, bot_id="defa
             model="whisper-1",
             file=audio_file,
             response_format="json",
-            language="en"   # default English
+            language="hi"   # default Hindi
         )
         
         user_text = getattr(transcript, 'text', '').strip()
@@ -843,7 +843,7 @@ async def voice_stream_websocket(websocket: WebSocket, bot_id: str = "default"):
                 model="whisper-1",
                 file=audio_file,
                 response_format="json",
-                language="en"   # default English
+                language="hi"   # default Hindi
             )
             
             user_text = getattr(transcript, 'text', '').strip()
@@ -898,7 +898,7 @@ async def voice_stream_legacy(websocket: WebSocket, bot_id: str = "default"):
                 model="whisper-1",
                 file=audio_file,
                 response_format="json",
-                language="en"   # default English
+                language="hi"   # default Hindi
             )
             
             user_text = getattr(transcript, 'text', '').strip()
@@ -1001,7 +1001,7 @@ async def voice_chat(file: UploadFile = File(...), bot_id: str = "default"):
             model="whisper-1",
             file=audio_file,
             response_format="json",
-            language="en"   # default English
+            language="hi"   # default Hindi
         )
         
         user_text = getattr(transcript, 'text', '').strip()
