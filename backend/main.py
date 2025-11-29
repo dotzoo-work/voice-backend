@@ -439,7 +439,7 @@ async def speech_to_text(file: UploadFile = File(...)):
         audio_file.name = "audio.wav"
         
         transcript = client.audio.transcriptions.create(
-            model="gpt-4o-mini-transcribe",
+            model="whisper-1",
             file=audio_file,
             response_format="json"
         )
@@ -572,7 +572,7 @@ async def process_realtime_audio(audio_data, websocket, session_id, bot_id="defa
         
         # Fast STT processing
         transcript = client.audio.transcriptions.create(
-            model="gpt-4o-mini-transcribe",
+            model="whisper-1",
             file=audio_file,
             response_format="json"
         )
