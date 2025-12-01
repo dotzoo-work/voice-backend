@@ -1,4 +1,4 @@
-name: CI/CD Deploy Voice Bot Backend to EC2
+name: CI/CD Deploy Voice Bot Backend too EC2
 
 on:
   push:

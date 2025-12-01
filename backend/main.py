@@ -5,7 +5,7 @@ from pydantic import BaseModel
 import openai
 import httpx
 import traceback
-##Request models
+###Request models
 class ChatRequest(BaseModel):
     message: str
     bot_id: str = "default"
