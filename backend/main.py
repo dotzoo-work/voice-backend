@@ -228,7 +228,7 @@ async def get_chatbot_response(message: str, bot_id: str = "default", lang: str 
     except httpx.ConnectError as e:
         print(f"❌ Connection error: {e}")
         traceback.print_exc()
-        return "I couldn’t reach the chatbot service. Please check your connection."
+        return "I couldn't reach the chatbot service. Please check your connection."
 
     except httpx.TimeoutException:
         print("⚠️ Timeout contacting chatbot API.")
@@ -441,7 +441,8 @@ async def speech_to_text(file: UploadFile = File(...)):
         transcript = client.audio.transcriptions.create(
             model="whisper-1",
             file=audio_file,
-            response_format="json"
+            response_format="json",
+            temperature=0
         )
         
         return {
@@ -590,19 +591,19 @@ async def process_realtime_audio(audio_data, websocket, session_id, bot_id="defa
             # Default to webm for WebSocket audio
             audio_file.name = f"realtime_{session_id}.webm"
         
-        # Whisper Forced Language STT
+        # Whisper Auto Language Detection
         transcript = client.audio.transcriptions.create(
             model="whisper-1",
             file=audio_file,
             response_format="json",
-            language="hi"   # default Hindi
+            temperature=0
         )
         
         user_text = getattr(transcript, 'text', '').strip()
         
-        # Ultra-accurate language detection
-        detected = await detect_language(user_text)
-        lang = force_allowed_language(detected)
+        # Use Whisper's built-in language detection
+        whisper_lang = transcript.language
+        lang = force_allowed_language(whisper_lang)
         
         if user_text:
             # Send transcript immediately
@@ -685,12 +686,16 @@ async def process_complete_audio(audio_data, websocket, session_id, bot_id="defa
             model="whisper-1",
             file=audio_file,
             response_format="json",
-            language="hi"   # default Hindi
+            temperature=0
         )
         
         user_text = getattr(transcript, 'text', '').strip()
-        detected = await detect_language(user_text)
-        lang = force_allowed_language(detected)
+        whisper_lang = getattr(transcript, 'language', '') or ''
+        if whisper_lang in ALLOWED_LANGUAGES:
+            lang = whisper_lang
+        else:
+            detected = await detect_language(user_text)
+            lang = force_allowed_language(detected)
         
         if user_text:
             # Send transcript
@@ -764,7 +769,7 @@ async def process_audio_chunk(audio_data, websocket, chunk_id):
             model="whisper-1",
             file=audio_file,
             response_format="json",
-            language="hi"   # default Hindi
+            temperature=0
         )
         
         # Handle both text response and object response
@@ -838,17 +843,21 @@ async def voice_stream_websocket(websocket: WebSocket, bot_id: str = "default"):
             audio_file = io.BytesIO(data)
             audio_file.name = "stream.wav"
             
-            # STT with high accuracy language detection
+            # STT with auto language detection
             transcript = client.audio.transcriptions.create(
                 model="whisper-1",
                 file=audio_file,
                 response_format="json",
-                language="hi"   # default Hindi
+                temperature=0
             )
             
             user_text = getattr(transcript, 'text', '').strip()
-            detected = await detect_language(user_text)
-            lang = force_allowed_language(detected)
+            whisper_lang = getattr(transcript, 'language', '') or ''
+            if whisper_lang in ALLOWED_LANGUAGES:
+                lang = whisper_lang
+            else:
+                detected = await detect_language(user_text)
+                lang = force_allowed_language(detected)
             
             await websocket.send_json({
                 "type": "transcript",
@@ -898,12 +907,16 @@ async def voice_stream_legacy(websocket: WebSocket, bot_id: str = "default"):
                 model="whisper-1",
                 file=audio_file,
                 response_format="json",
-                language="hi"   # default Hindi
+                temperature=0
             )
             
             user_text = getattr(transcript, 'text', '').strip()
-            detected = await detect_language(user_text)
-            lang = force_allowed_language(detected)
+            whisper_lang = getattr(transcript, 'language', '') or ''
+            if whisper_lang in ALLOWED_LANGUAGES:
+                lang = whisper_lang
+            else:
+                detected = await detect_language(user_text)
+                lang = force_allowed_language(detected)
             
             await websocket.send_json({
                 "type": "transcript",
@@ -1003,12 +1016,12 @@ async def voice_chat(file: UploadFile = File(...), bot_id: str = "default"):
             model="whisper-1",
             file=audio_file,
             response_format="json",
-            language="hi"   # default Hindi
+            temperature=0
         )
         
-        user_text = getattr(transcript, 'text', '').strip()
-        detected = await detect_language(user_text)
-        lang = force_allowed_language(detected)
+        user_text = transcript.text.strip()
+        whisper_lang = transcript.language
+        lang = force_allowed_language(whisper_lang)
         if not user_text:
             user_text = "Hello"
         
