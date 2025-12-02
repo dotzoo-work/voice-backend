@@ -37,12 +37,28 @@ def normalize_lang(lang):
         return "en"
     return lang
 
-# ⭐ STEP 1 — Force allowed language function
-def force_allowed_language(detected):
-    allowed = ALLOWED_LANGUAGES  # use the central list
-    if detected in allowed:
-        return detected
-    # sensible fallback to English if detection failed
+def select_final_language(whisper_lang, transcript_text):
+    ALLOWED_LANGUAGES = ["en", "hi", "pa", "gu", "es", "ku"]
+
+    # 1️⃣ Urdu → FORCE Hindi
+    if whisper_lang == "ur":
+        return "hi"
+
+    # 2️⃣ If transcript contains Urdu script → also force Hindi
+    if any(0x0600 <= ord(ch) <= 0x06FF for ch in transcript_text):
+        return "hi"
+
+    # 3️⃣ If Whisper language is in allowed list → accept it
+    if whisper_lang in ALLOWED_LANGUAGES:
+        return whisper_lang
+
+    # 4️⃣ Whisper sometimes returns "en" even for Hindi speaking
+    # extra safety: Hindi words → Hindi
+    hindi_keywords = ["kya", "kaise", "aap", "main", "mera", "karta", "karte", "hai"]
+    if any(word in transcript_text.lower() for word in hindi_keywords):
+        return "hi"
+
+    # 5️⃣ Otherwise fallback to English
     return "en"
 
 app = FastAPI(title="Voice Backend Service")
@@ -603,7 +619,7 @@ async def process_realtime_audio(audio_data, websocket, session_id, bot_id="defa
         
         # Use Whisper's built-in language detection - handle response properly
         whisper_lang = getattr(transcript, 'language', None) or 'en'
-        lang = force_allowed_language(whisper_lang)
+        lang = select_final_language(whisper_lang, user_text)
         
         if user_text:
             # Send transcript immediately
@@ -691,11 +707,7 @@ async def process_complete_audio(audio_data, websocket, session_id, bot_id="defa
         
         user_text = getattr(transcript, 'text', '').strip()
         whisper_lang = getattr(transcript, 'language', '') or ''
-        if whisper_lang in ALLOWED_LANGUAGES:
-            lang = whisper_lang
-        else:
-            detected = await detect_language(user_text)
-            lang = force_allowed_language(detected)
+        lang = select_final_language(whisper_lang, user_text)
         
         if user_text:
             # Send transcript
@@ -798,7 +810,7 @@ async def process_chunk_response(text, websocket, chunk_id, bot_id="default"):
     try:
         # Get bot response with language
         detected = await detect_language(text)
-        lang = force_allowed_language(detected)
+        lang = select_final_language(detected, text)
         bot_response = await get_chatbot_response(text, bot_id, lang)
         
         # Send response immediately
@@ -853,11 +865,7 @@ async def voice_stream_websocket(websocket: WebSocket, bot_id: str = "default"):
             
             user_text = getattr(transcript, 'text', '').strip()
             whisper_lang = getattr(transcript, 'language', '') or ''
-            if whisper_lang in ALLOWED_LANGUAGES:
-                lang = whisper_lang
-            else:
-                detected = await detect_language(user_text)
-                lang = force_allowed_language(detected)
+            lang = select_final_language(whisper_lang, user_text)
             
             await websocket.send_json({
                 "type": "transcript",
@@ -912,11 +920,7 @@ async def voice_stream_legacy(websocket: WebSocket, bot_id: str = "default"):
             
             user_text = getattr(transcript, 'text', '').strip()
             whisper_lang = getattr(transcript, 'language', '') or ''
-            if whisper_lang in ALLOWED_LANGUAGES:
-                lang = whisper_lang
-            else:
-                detected = await detect_language(user_text)
-                lang = force_allowed_language(detected)
+            lang = select_final_language(whisper_lang, user_text)
             
             await websocket.send_json({
                 "type": "transcript",
@@ -968,7 +972,7 @@ async def websocket_bot_endpoint_old(websocket: WebSocket, bot_id: str = "defaul
                 
                 # Detect language and get chatbot response
                 detected = await detect_language(message)
-                lang = force_allowed_language(detected)
+                lang = select_final_language(detected, message)
                 response_text = await get_chatbot_response(message, bot_id, lang)
                 
                 # Send text response
@@ -1021,7 +1025,7 @@ async def voice_chat(file: UploadFile = File(...), bot_id: str = "default"):
         
         user_text = transcript.text.strip()
         whisper_lang = transcript.language
-        lang = force_allowed_language(whisper_lang)
+        lang = select_final_language(whisper_lang, user_text)
         if not user_text:
             user_text = "Hello"
         
