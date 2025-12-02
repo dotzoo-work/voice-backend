@@ -601,8 +601,8 @@ async def process_realtime_audio(audio_data, websocket, session_id, bot_id="defa
         
         user_text = getattr(transcript, 'text', '').strip()
         
-        # Use Whisper's built-in language detection
-        whisper_lang = transcript.language
+        # Use Whisper's built-in language detection - handle response properly
+        whisper_lang = getattr(transcript, 'language', None) or 'en'
         lang = force_allowed_language(whisper_lang)
         
         if user_text:
