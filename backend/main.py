@@ -593,8 +593,8 @@ async def process_realtime_audio(audio_data, websocket, session_id, bot_id="defa
             "session_id": session_id
         })
         
-        # Validate audio data
-        if len(audio_data) < 100:
+        # Validate audio data - need sufficient data for Whisper
+        if len(audio_data) < 5000:  # 5KB minimum
             print(f"Audio data too small: {len(audio_data)} bytes")
             await websocket.send_json({
                 "type": "no_speech_detected",
@@ -797,8 +797,9 @@ async def process_complete_audio(audio_data, websocket, session_id, bot_id="defa
 async def process_audio_chunk(audio_data, websocket, chunk_id):
     """Process individual audio chunk in real-time"""
     try:
-        # Skip if audio data is too small
-        if len(audio_data) < 1000:
+        # Skip if audio data is too small - need at least 1KB for Whisper
+        if len(audio_data) < 2000:
+            print(f"Skipping small chunk: {len(audio_data)} bytes")
             return
             
         # Quick STT processing
