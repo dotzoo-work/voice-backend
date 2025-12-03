@@ -593,27 +593,61 @@ async def process_realtime_audio(audio_data, websocket, session_id, bot_id="defa
             "session_id": session_id
         })
         
+        # Validate audio data
+        if len(audio_data) < 100:
+            print(f"Audio data too small: {len(audio_data)} bytes")
+            await websocket.send_json({
+                "type": "no_speech_detected",
+                "session_id": session_id,
+                "reason": "audio_too_small"
+            })
+            return
+        
         # STT processing with proper audio format handling
         audio_file = io.BytesIO(audio_data)
         
-        # Detect audio format from data header
-        if audio_data[:4] == b'RIFF':
-            audio_file.name = f"realtime_{session_id}.wav"
-        elif audio_data[:4] == b'OggS':
-            audio_file.name = f"realtime_{session_id}.ogg"
-        elif audio_data[:3] == b'ID3' or audio_data[:2] == b'\xff\xfb':
-            audio_file.name = f"realtime_{session_id}.mp3"
-        else:
-            # Default to webm for WebSocket audio
-            audio_file.name = f"realtime_{session_id}.webm"
+        # Log audio data info for debugging
+        print(f"Audio data size: {len(audio_data)} bytes")
+        if len(audio_data) > 4:
+            header = audio_data[:4]
+            print(f"Audio header: {header} (hex: {header.hex()})")
         
-        # Whisper Auto Language Detection
-        transcript = client.audio.transcriptions.create(
-            model="whisper-1",
-            file=audio_file,
-            response_format="json",
-            temperature=0
-        )
+        # Always use .wav for WebSocket audio - most compatible with Whisper
+        audio_file.name = f"realtime_{session_id}.wav"
+        
+        # Whisper Auto Language Detection with multiple format fallbacks
+        transcript = None
+        formats_to_try = [
+            (f"realtime_{session_id}.wav", "WAV"),
+            (f"realtime_{session_id}.webm", "WebM"),
+            (f"realtime_{session_id}.ogg", "OGG"),
+            (f"realtime_{session_id}.mp3", "MP3")
+        ]
+        
+        for filename, format_name in formats_to_try:
+            try:
+                audio_file.name = filename
+                audio_file.seek(0)  # Reset file pointer
+                print(f"Trying Whisper with {format_name} format...")
+                
+                transcript = client.audio.transcriptions.create(
+                    model="whisper-1",
+                    file=audio_file,
+                    response_format="json",
+                    temperature=0
+                )
+                print(f"✅ Success with {format_name} format")
+                break
+                
+            except Exception as whisper_error:
+                print(f"❌ {format_name} format failed: {whisper_error}")
+                if "Invalid file format" not in str(whisper_error):
+                    # If it's not a format error, don't try other formats
+                    raise whisper_error
+                continue
+        
+        if transcript is None:
+            raise Exception("All audio format attempts failed with Whisper API")
         
         user_text = getattr(transcript, 'text', '').strip()
         
@@ -769,20 +803,24 @@ async def process_audio_chunk(audio_data, websocket, chunk_id):
             
         # Quick STT processing
         audio_file = io.BytesIO(audio_data)
-        # Try different extensions based on the audio data
-        if len(audio_data) > 0:
-            # Check if it looks like WAV (starts with RIFF)
-            if audio_data[:4] == b'RIFF':
-                audio_file.name = f"chunk_{chunk_id}.wav"
-            else:
-                audio_file.name = f"chunk_{chunk_id}.webm"
+        # Always use .wav for audio chunks - most compatible with Whisper
+        audio_file.name = f"chunk_{chunk_id}.wav"
         
-        transcript = client.audio.transcriptions.create(
-            model="whisper-1",
-            file=audio_file,
-            response_format="json",
-            temperature=0
-        )
+        try:
+            transcript = client.audio.transcriptions.create(
+                model="whisper-1",
+                file=audio_file,
+                response_format="json",
+                temperature=0
+            )
+        except Exception as whisper_error:
+            print(f"Chunk Whisper API error: {whisper_error}")
+            # Skip this chunk if format error
+            if "Invalid file format" in str(whisper_error):
+                print(f"Skipping chunk {chunk_id} due to format error")
+                return
+            else:
+                raise whisper_error
         
         # Handle both text response and object response
         if isinstance(transcript, str):
