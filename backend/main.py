@@ -28,7 +28,12 @@ import time
 import tempfile
 import subprocess
 import aiofiles
-from ffmpeg_static import ffmpeg_path
+# EC2-compatible ffmpeg handling
+try:
+    from ffmpeg_static import ffmpeg_path
+except ImportError:
+    # Fallback for EC2 deployment - use system ffmpeg
+    ffmpeg_path = "ffmpeg"
 # import redis.asyncio as redis  # Commented out for now
 
 load_dotenv()
@@ -66,8 +71,11 @@ def select_final_language(whisper_lang, transcript_text):
     return "en"
 
 async def convert_audio_to_wav(audio_data, input_format="webm"):
-    """Convert audio to WAV format using ffmpeg-static"""
+    """Convert audio to WAV format - EC2 compatible"""
     try:
+        # EC2 will have ffmpeg installed via Dockerfile
+        print(f"Converting {input_format} audio to WAV format for better Whisper accuracy")
+            
         # Create temporary files
         with tempfile.NamedTemporaryFile(delete=False, suffix=f".{input_format}") as original_file:
             original_file.write(audio_data)
@@ -98,7 +106,14 @@ async def convert_audio_to_wav(audio_data, input_format="webm"):
                 if process.returncode != 0:
                     error_msg = process.stderr.decode() if process.stderr else "Unknown FFmpeg error"
                     print(f"FFmpeg conversion failed: {error_msg}")
-                    raise Exception(f"Audio conversion failed: {error_msg}")
+                    # Cleanup temp files before fallback
+                    try:
+                        os.unlink(original_file.name)
+                        os.unlink(wav_file.name)
+                    except:
+                        pass
+                    # Fallback to original data instead of failing
+                    return audio_data
                 
                 # Read converted WAV file
                 with open(wav_file.name, "rb") as f:
@@ -116,8 +131,8 @@ async def convert_audio_to_wav(audio_data, input_format="webm"):
                 return wav_data
                 
     except Exception as e:
-        print(f"Audio conversion error: {e}")
-        # Fallback: return original data
+        print(f"Audio conversion error: {e} - using original data")
+        # Always fallback to original data
         return audio_data
 
 app = FastAPI(title="Voice Backend Service")
