@@ -25,6 +25,10 @@ import unicodedata
 import asyncio
 import hashlib
 import time
+import tempfile
+import subprocess
+import aiofiles
+from ffmpeg_static import ffmpeg_path
 # import redis.asyncio as redis  # Commented out for now
 
 load_dotenv()
@@ -60,6 +64,61 @@ def select_final_language(whisper_lang, transcript_text):
 
     # 5️⃣ Otherwise fallback to English
     return "en"
+
+async def convert_audio_to_wav(audio_data, input_format="webm"):
+    """Convert audio to WAV format using ffmpeg-static"""
+    try:
+        # Create temporary files
+        with tempfile.NamedTemporaryFile(delete=False, suffix=f".{input_format}") as original_file:
+            original_file.write(audio_data)
+            original_file.flush()
+            
+            # Create WAV output file
+            with tempfile.NamedTemporaryFile(delete=False, suffix=".wav") as wav_file:
+                # FFmpeg conversion command
+                convert_cmd = [
+                    ffmpeg_path,
+                    "-y",  # Overwrite output file
+                    "-i", original_file.name,  # Input file
+                    "-ar", "16000",  # Sample rate 16kHz
+                    "-ac", "1",  # Mono channel
+                    wav_file.name  # Output file
+                ]
+                
+                print(f"Converting {input_format} to WAV: {original_file.name} -> {wav_file.name}")
+                
+                # Run FFmpeg conversion
+                process = subprocess.run(
+                    convert_cmd, 
+                    stdout=subprocess.PIPE, 
+                    stderr=subprocess.PIPE,
+                    timeout=30
+                )
+                
+                if process.returncode != 0:
+                    error_msg = process.stderr.decode() if process.stderr else "Unknown FFmpeg error"
+                    print(f"FFmpeg conversion failed: {error_msg}")
+                    raise Exception(f"Audio conversion failed: {error_msg}")
+                
+                # Read converted WAV file
+                with open(wav_file.name, "rb") as f:
+                    wav_data = f.read()
+                
+                print(f"Conversion successful: {len(wav_data)} bytes WAV")
+                
+                # Cleanup temp files
+                try:
+                    os.unlink(original_file.name)
+                    os.unlink(wav_file.name)
+                except:
+                    pass
+                
+                return wav_data
+                
+    except Exception as e:
+        print(f"Audio conversion error: {e}")
+        # Fallback: return original data
+        return audio_data
 
 app = FastAPI(title="Voice Backend Service")
 
@@ -603,51 +662,30 @@ async def process_realtime_audio(audio_data, websocket, session_id, bot_id="defa
             })
             return
         
-        # STT processing with proper audio format handling
-        audio_file = io.BytesIO(audio_data)
+        # 🔥 FFMPEG CONVERSION - Convert WebM to WAV before Whisper
+        print(f"Original audio size: {len(audio_data)} bytes")
         
-        # Log audio data info for debugging
-        print(f"Audio data size: {len(audio_data)} bytes")
-        if len(audio_data) > 4:
-            header = audio_data[:4]
-            print(f"Audio header: {header} (hex: {header.hex()})")
+        # Convert audio to WAV format using ffmpeg-static
+        wav_data = await convert_audio_to_wav(audio_data, "webm")
         
-        # Always use .wav for WebSocket audio - most compatible with Whisper
+        # Create audio file object for Whisper
+        audio_file = io.BytesIO(wav_data)
         audio_file.name = f"realtime_{session_id}.wav"
         
-        # Whisper Auto Language Detection with multiple format fallbacks
-        transcript = None
-        formats_to_try = [
-            (f"realtime_{session_id}.wav", "WAV"),
-            (f"realtime_{session_id}.webm", "WebM"),
-            (f"realtime_{session_id}.ogg", "OGG"),
-            (f"realtime_{session_id}.mp3", "MP3")
-        ]
+        print(f"Sending WAV to Whisper: {len(wav_data)} bytes")
         
-        for filename, format_name in formats_to_try:
-            try:
-                audio_file.name = filename
-                audio_file.seek(0)  # Reset file pointer
-                print(f"Trying Whisper with {format_name} format...")
-                
-                transcript = client.audio.transcriptions.create(
-                    model="whisper-1",
-                    file=audio_file,
-                    response_format="json",
-                    temperature=0
-                )
-                print(f"✅ Success with {format_name} format")
-                break
-                
-            except Exception as whisper_error:
-                print(f"❌ {format_name} format failed: {whisper_error}")
-                if "Invalid file format" not in str(whisper_error):
-                    # If it's not a format error, don't try other formats
-                    raise whisper_error
-                continue
-        
-        if transcript is None:
-            raise Exception("All audio format attempts failed with Whisper API")
+        # Send converted WAV directly to Whisper
+        try:
+            transcript = client.audio.transcriptions.create(
+                model="whisper-1",
+                file=audio_file,
+                response_format="json",
+                temperature=0
+            )
+            print(f"✅ Whisper transcription successful")
+        except Exception as whisper_error:
+            print(f"❌ Whisper failed even with WAV: {whisper_error}")
+            raise whisper_error
         
         user_text = getattr(transcript, 'text', '').strip()
         
@@ -727,9 +765,11 @@ async def process_complete_audio(audio_data, websocket, session_id, bot_id="defa
             "session_id": session_id
         })
         
-        # STT processing
-        audio_file = io.BytesIO(audio_data)
-        # Always use .wav for WebSocket audio chunks
+        # 🔥 FFMPEG CONVERSION - Convert to WAV before Whisper
+        wav_data = await convert_audio_to_wav(audio_data, "webm")
+        
+        # STT processing with converted WAV
+        audio_file = io.BytesIO(wav_data)
         audio_file.name = f"session_{session_id}.wav"
         
         transcript = client.audio.transcriptions.create(
@@ -802,9 +842,11 @@ async def process_audio_chunk(audio_data, websocket, chunk_id):
             print(f"Skipping small chunk: {len(audio_data)} bytes")
             return
             
-        # Quick STT processing
-        audio_file = io.BytesIO(audio_data)
-        # Always use .wav for audio chunks - most compatible with Whisper
+        # 🔥 FFMPEG CONVERSION - Convert to WAV before Whisper
+        wav_data = await convert_audio_to_wav(audio_data, "webm")
+        
+        # Quick STT processing with converted WAV
+        audio_file = io.BytesIO(wav_data)
         audio_file.name = f"chunk_{chunk_id}.wav"
         
         try:
@@ -891,7 +933,10 @@ async def voice_stream_websocket(websocket: WebSocket, bot_id: str = "default"):
         while True:
             data = await websocket.receive_bytes()
             
-            audio_file = io.BytesIO(data)
+            # 🔥 FFMPEG CONVERSION - Convert to WAV before Whisper
+            wav_data = await convert_audio_to_wav(data, "webm")
+            
+            audio_file = io.BytesIO(wav_data)
             audio_file.name = "stream.wav"
             
             # STT with auto language detection
@@ -947,7 +992,10 @@ async def voice_stream_legacy(websocket: WebSocket, bot_id: str = "default"):
         while True:
             data = await websocket.receive_bytes()
             
-            audio_file = io.BytesIO(data)
+            # 🔥 FFMPEG CONVERSION - Convert to WAV before Whisper
+            wav_data = await convert_audio_to_wav(data, "webm")
+            
+            audio_file = io.BytesIO(wav_data)
             audio_file.name = "stream.wav"
             
             transcript = client.audio.transcriptions.create(
@@ -1049,11 +1097,16 @@ async def voice_chat(file: UploadFile = File(...), bot_id: str = "default"):
         if len(audio_data) == 0:
             raise HTTPException(status_code=400, detail="Empty audio file")
         
-        print(f"Audio file size: {len(audio_data)} bytes")
+        print(f"Original audio file size: {len(audio_data)} bytes")
         
-        # STT Processing
-        audio_file = io.BytesIO(audio_data)
+        # 🔥 FFMPEG CONVERSION - Convert to WAV before Whisper
+        wav_data = await convert_audio_to_wav(audio_data, "webm")
+        
+        # STT Processing with converted WAV
+        audio_file = io.BytesIO(wav_data)
         audio_file.name = "audio.wav"
+        
+        print(f"Sending WAV to Whisper: {len(wav_data)} bytes")
         
         transcript = client.audio.transcriptions.create(
             model="whisper-1",
