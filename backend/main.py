@@ -46,29 +46,60 @@ def normalize_lang(lang):
         return "en"
     return lang
 
-def select_final_language(whisper_lang, transcript_text):
-    ALLOWED_LANGUAGES = ["en", "hi", "pa", "gu", "es", "ku"]
+def normalize_script(lang, text):
+    """Convert wrong script to correct script for each language"""
+    try:
+        # Hindi spoken but Urdu script → convert to Devanagari
+        if lang == "hi" and any(0x0600 <= ord(ch) <= 0x06FF for ch in text):
+            from indic_transliteration import sanscript
+            from indic_transliteration.sanscript import transliterate
+            return transliterate(text, sanscript.URDU, sanscript.DEVANAGARI)
+        
+        # Punjabi spoken but Urdu script → convert to Gurmukhi
+        if lang == "pa" and any(0x0600 <= ord(ch) <= 0x06FF for ch in text):
+            from indic_transliteration import sanscript
+            from indic_transliteration.sanscript import transliterate
+            return transliterate(text, sanscript.URDU, sanscript.GURMUKHI)
+        
+        # Gujarati spoken but Arabic script → convert to Gujarati
+        if lang == "gu" and any(0x0600 <= ord(ch) <= 0x06FF for ch in text):
+            from indic_transliteration import sanscript
+            from indic_transliteration.sanscript import transliterate
+            return transliterate(text, sanscript.URDU, sanscript.GUJARATI)
+        
+        return text
+    except Exception as e:
+        print(f"Script normalization error: {e}")
+        return text
 
-    # 1️⃣ Urdu → FORCE Hindi
-    if whisper_lang == "ur":
+def final_language(detected_lang):
+    """Check if detected language is allowed"""
+    if detected_lang in ALLOWED_LANGUAGES:
+        return detected_lang
+    
+    # Urdu → Hindi (language mapping)
+    if detected_lang == "ur":
         return "hi"
-
-    # 2️⃣ If transcript contains Urdu script → also force Hindi
-    if any(0x0600 <= ord(ch) <= 0x06FF for ch in transcript_text):
-        return "hi"
-
-    # 3️⃣ If Whisper language is in allowed list → accept it
-    if whisper_lang in ALLOWED_LANGUAGES:
-        return whisper_lang
-
-    # 4️⃣ Whisper sometimes returns "en" even for Hindi speaking
-    # extra safety: Hindi words → Hindi
-    hindi_keywords = ["kya", "kaise", "aap", "main", "mera", "karta", "karte", "hai"]
-    if any(word in transcript_text.lower() for word in hindi_keywords):
-        return "hi"
-
-    # 5️⃣ Otherwise fallback to English
+    
+    # All other non-allowed languages → English fallback
     return "en"
+
+def process_whisper_result(whisper_response):
+    """Process Whisper result with auto language detection and script normalization"""
+    detected_lang = getattr(whisper_response, 'language', 'en').lower()
+    transcript = getattr(whisper_response, 'text', '').strip()
+    
+    # Step 1: Normalize script if wrong script detected
+    normalized_transcript = normalize_script(detected_lang, transcript)
+    
+    # Step 2: Apply allowed language logic
+    final_lang = final_language(detected_lang)
+    
+    print(f"🎯 Whisper: {detected_lang} → Final: {final_lang}")
+    print(f"📝 Original: {transcript[:50]}...")
+    print(f"✅ Normalized: {normalized_transcript[:50]}...")
+    
+    return normalized_transcript, final_lang
 
 async def convert_audio_to_wav(audio_data, input_format="webm"):
     """Convert audio to WAV format - EC2 compatible"""
@@ -255,8 +286,9 @@ def clean_text_for_tts(text):
         print(f"Cleaning error: {e}")
         return "There was a text processing error."
 
-# ⭐ STEP 2 — Ultra-accurate 6-Language Detection
-async def detect_language(text):
+# ⭐ STEP 2 — Script-based Language Detection (Backup)
+async def detect_language_by_script(text):
+    """Backup language detection based on script"""
     if not text or len(text.strip()) < 2:
         return "en"
     
@@ -702,23 +734,21 @@ async def process_realtime_audio(audio_data, websocket, session_id, bot_id="defa
             print(f"❌ Whisper failed even with WAV: {whisper_error}")
             raise whisper_error
         
-        user_text = getattr(transcript, 'text', '').strip()
-        
-        # Use Whisper's built-in language detection - handle response properly
-        whisper_lang = getattr(transcript, 'language', None) or 'en'
-        lang = select_final_language(whisper_lang, user_text)
+        # 🎯 NEW LOGIC: Process Whisper result with script normalization
+        normalized_text, final_lang = process_whisper_result(transcript)
+        user_text = normalized_text
         
         if user_text:
             # Send transcript immediately
             await websocket.send_json({
                 "type": "transcript",
                 "text": user_text,
-                "language": lang,
+                "language": final_lang,
                 "session_id": session_id
             })
             
             # Get chatbot response with language
-            bot_response = await get_chatbot_response(user_text, bot_id, lang)
+            bot_response = await get_chatbot_response(user_text, bot_id, final_lang)
             
             # Send bot response
             await websocket.send_json({
@@ -730,7 +760,7 @@ async def process_realtime_audio(audio_data, websocket, session_id, bot_id="defa
             # Generate TTS with detected language
             clean_text = clean_text_for_tts(bot_response)
             optimized_text = optimize_text_for_tts(clean_text)
-            audio_content = await generate_tts_audio(optimized_text, lang)
+            audio_content = await generate_tts_audio(optimized_text, final_lang)
             
             if audio_content:
                 audio_b64 = base64.b64encode(audio_content).decode()
@@ -794,21 +824,21 @@ async def process_complete_audio(audio_data, websocket, session_id, bot_id="defa
             temperature=0
         )
         
-        user_text = getattr(transcript, 'text', '').strip()
-        whisper_lang = getattr(transcript, 'language', '') or ''
-        lang = select_final_language(whisper_lang, user_text)
+        # 🎯 NEW LOGIC: Process Whisper result with script normalization
+        normalized_text, final_lang = process_whisper_result(transcript)
+        user_text = normalized_text
         
         if user_text:
             # Send transcript
             await websocket.send_json({
                 "type": "transcript",
                 "text": user_text,
-                "language": lang,
+                "language": final_lang,
                 "session_id": session_id
             })
             
             # Get chatbot response with language
-            bot_response = await get_chatbot_response(user_text, bot_id, lang)
+            bot_response = await get_chatbot_response(user_text, bot_id, final_lang)
             
             # Send bot response
             await websocket.send_json({
@@ -820,7 +850,7 @@ async def process_complete_audio(audio_data, websocket, session_id, bot_id="defa
             # Generate TTS with detected language
             clean_text = clean_text_for_tts(bot_response)
             optimized_text = optimize_text_for_tts(clean_text)
-            audio_content = await generate_tts_audio(optimized_text, lang)
+            audio_content = await generate_tts_audio(optimized_text, final_lang)
             
             if audio_content:
                 audio_b64 = base64.b64encode(audio_content).decode()
@@ -905,8 +935,8 @@ async def process_chunk_response(text, websocket, chunk_id, bot_id="default"):
     """Process chatbot response for chunk"""
     try:
         # Get bot response with language
-        detected = await detect_language(text)
-        lang = select_final_language(detected, text)
+        detected = await detect_language_by_script(text)
+        lang = final_language(detected)
         bot_response = await get_chatbot_response(text, bot_id, lang)
         
         # Send response immediately
@@ -962,19 +992,19 @@ async def voice_stream_websocket(websocket: WebSocket, bot_id: str = "default"):
                 temperature=0
             )
             
-            user_text = getattr(transcript, 'text', '').strip()
-            whisper_lang = getattr(transcript, 'language', '') or ''
-            lang = select_final_language(whisper_lang, user_text)
+            # 🎯 NEW LOGIC: Process Whisper result with script normalization
+            normalized_text, final_lang = process_whisper_result(transcript)
+            user_text = normalized_text
             
             await websocket.send_json({
                 "type": "transcript",
                 "text": user_text,
-                "language": lang
+                "language": final_lang
             })
             
             # Ultra-fast parallel processing
             async def get_and_send_response():
-                bot_response = await get_chatbot_response(user_text, bot_id, lang)
+                bot_response = await get_chatbot_response(user_text, bot_id, final_lang)
                 await websocket.send_json({
                     "type": "bot_response",
                     "text": bot_response
@@ -984,7 +1014,7 @@ async def voice_stream_websocket(websocket: WebSocket, bot_id: str = "default"):
             async def process_tts(bot_response):
                 clean_response = clean_text_for_tts(bot_response)
                 optimized_response = optimize_text_for_tts(clean_response)
-                await generate_tts_audio_streaming(optimized_response, websocket, lang)
+                await generate_tts_audio_streaming(optimized_response, websocket, final_lang)
                 await websocket.send_json({"type": "audio_complete"})
             
             # Start chat response immediately
@@ -1020,18 +1050,18 @@ async def voice_stream_legacy(websocket: WebSocket, bot_id: str = "default"):
                 temperature=0
             )
             
-            user_text = getattr(transcript, 'text', '').strip()
-            whisper_lang = getattr(transcript, 'language', '') or ''
-            lang = select_final_language(whisper_lang, user_text)
+            # 🎯 NEW LOGIC: Process Whisper result with script normalization
+            normalized_text, final_lang = process_whisper_result(transcript)
+            user_text = normalized_text
             
             await websocket.send_json({
                 "type": "transcript",
                 "text": user_text,
-                "language": lang
+                "language": final_lang
             })
             
             async def process_response():
-                bot_response = await get_chatbot_response(user_text, bot_id, lang)
+                bot_response = await get_chatbot_response(user_text, bot_id, final_lang)
                 
                 await websocket.send_json({
                     "type": "bot_response",
@@ -1041,7 +1071,7 @@ async def voice_stream_legacy(websocket: WebSocket, bot_id: str = "default"):
                 clean_response = clean_text_for_tts(bot_response)
                 optimized_response = optimize_text_for_tts(clean_response)
                 
-                audio_content = await generate_tts_audio(optimized_response, lang)
+                audio_content = await generate_tts_audio(optimized_response, final_lang)
                 if audio_content:
                     audio_b64 = base64.b64encode(audio_content).decode()
                     await websocket.send_json({
@@ -1073,8 +1103,8 @@ async def websocket_bot_endpoint_old(websocket: WebSocket, bot_id: str = "defaul
                 message = data.get("message", "")
                 
                 # Detect language and get chatbot response
-                detected = await detect_language(message)
-                lang = select_final_language(detected, message)
+                detected = await detect_language_by_script(message)
+                lang = final_language(detected)
                 response_text = await get_chatbot_response(message, bot_id, lang)
                 
                 # Send text response
@@ -1130,16 +1160,16 @@ async def voice_chat(file: UploadFile = File(...), bot_id: str = "default"):
             temperature=0
         )
         
-        user_text = transcript.text.strip()
-        whisper_lang = transcript.language
-        lang = select_final_language(whisper_lang, user_text)
+        # 🎯 NEW LOGIC: Process Whisper result with script normalization
+        normalized_text, final_lang = process_whisper_result(transcript)
+        user_text = normalized_text
         if not user_text:
             user_text = "Hello"
         
-        print(f"User: {user_text} (Language: {lang})")
+        print(f"User: {user_text} (Language: {final_lang})")
         
         # Get chatbot response with language
-        bot_response = await get_chatbot_response(user_text, bot_id, lang)
+        bot_response = await get_chatbot_response(user_text, bot_id, final_lang)
         print(f"Bot original: {bot_response}")
         
         # Clean and optimize response
@@ -1148,7 +1178,7 @@ async def voice_chat(file: UploadFile = File(...), bot_id: str = "default"):
         print(f"Bot optimized: {optimized_response}")
         
         # Generate TTS with detected language
-        audio_content = await generate_tts_audio(optimized_response, lang)
+        audio_content = await generate_tts_audio(optimized_response, final_lang)
         
         if audio_content:
             return Response(
