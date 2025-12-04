@@ -72,6 +72,36 @@ def normalize_script(lang, text):
         print(f"Script normalization error: {e}")
         return text
 
+def detect_language_from_text(text):
+    """Detect language from text content using Unicode ranges"""
+    text = text.strip()
+
+    # Urdu / Arabic script
+    if any(0x0600 <= ord(ch) <= 0x06FF for ch in text):
+        return "ur"
+
+    # Hindi (Devanagari)
+    if any(0x0900 <= ord(ch) <= 0x097F for ch in text):
+        return "hi"
+
+    # Punjabi (Gurmukhi)
+    if any(0x0A00 <= ord(ch) <= 0x0A7F for ch in text):
+        return "pa"
+
+    # Gujarati
+    if any(0x0A80 <= ord(ch) <= 0x0AFF for ch in text):
+        return "gu"
+
+    # Spanish letters
+    if any(ch in "áéíóúñ" for ch in text.lower()):
+        return "es"
+
+    # Kurdish
+    if any(ch in "êîşû" for ch in text.lower()):
+        return "ku"
+
+    return "en"
+
 def final_language(detected_lang):
     """Check if detected language is allowed"""
     if detected_lang in ALLOWED_LANGUAGES:
@@ -85,21 +115,19 @@ def final_language(detected_lang):
     return "en"
 
 def process_whisper_result(whisper_response):
-    """Process Whisper result with auto language detection and script normalization"""
-    detected_lang = getattr(whisper_response, 'language', 'en').lower()
+    """Process Whisper result with text-based language detection"""
     transcript = getattr(whisper_response, 'text', '').strip()
     
-    # Step 1: Normalize script if wrong script detected
-    normalized_transcript = normalize_script(detected_lang, transcript)
+    # REAL language detection from text content
+    lang_from_text = detect_language_from_text(transcript)
     
-    # Step 2: Apply allowed language logic
-    final_lang = final_language(detected_lang)
+    # Apply allowed languages logic
+    final_lang_value = final_language(lang_from_text)
     
-    print(f"🎯 Whisper: {detected_lang} → Final: {final_lang}")
-    print(f"📝 Original: {transcript[:50]}...")
-    print(f"✅ Normalized: {normalized_transcript[:50]}...")
+    print(f"🎯 Text Detection: {lang_from_text} → Final: {final_lang_value}")
+    print(f"📝 Transcript: {transcript[:50]}...")
     
-    return normalized_transcript, final_lang
+    return transcript, final_lang_value
 
 async def convert_audio_to_wav(audio_data, input_format="webm"):
     """Convert audio to WAV format - EC2 compatible"""
