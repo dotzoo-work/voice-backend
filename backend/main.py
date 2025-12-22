@@ -1,3 +1,6 @@
+import sys
+sys.stdout.reconfigure(encoding='utf-8')
+
 from fastapi import FastAPI, HTTPException, File, UploadFile, WebSocket
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import StreamingResponse, Response
@@ -5,6 +8,8 @@ from pydantic import BaseModel
 import openai
 import httpx
 import traceback
+from sarvamai import SarvamAI
+from sarvamai.play import save
 ####Request models
 class ChatRequest(BaseModel):
     message: str
@@ -28,159 +33,157 @@ import time
 import tempfile
 import subprocess
 import aiofiles
-# EC2-compatible ffmpeg handling
+# FFmpeg setup using imageio-ffmpeg
+FFMPEG_AVAILABLE = False
+ffmpeg_path = None
+
 try:
-    from ffmpeg_static import ffmpeg_path
+    from imageio_ffmpeg import get_ffmpeg_exe
+    ffmpeg_path = get_ffmpeg_exe()
+    
+    # Test if it works
+    result = subprocess.run([ffmpeg_path, "-version"], 
+                          capture_output=True, text=True, timeout=5)
+    if result.returncode == 0:
+        FFMPEG_AVAILABLE = True
+        print(f"✅ FFmpeg available: {ffmpeg_path}")
+    else:
+        print(f"❌ FFmpeg test failed")
 except ImportError:
-    # Fallback for EC2 deployment - use system ffmpeg
-    ffmpeg_path = "ffmpeg"
-# import redis.asyncio as redis  # Commented out for now
+    print(f"❌ imageio-ffmpeg not installed")
+except Exception as e:
+    print(f"❌ FFmpeg setup failed: {e}")
+    
+print(f"FFmpeg status: {'ENABLED' if FFMPEG_AVAILABLE else 'DISABLED'}")
+
 
 load_dotenv()
 
-# ⭐ STEP 1 — Only 6 allowed languages
-ALLOWED_LANGUAGES = ["en", "hi", "pa", "gu", "es", "ku"]
 
-def normalize_lang(lang):
+
+# Session-wise audio buffers - not needed for full blob approach
+# SESSION_AUDIO_BUFFERS = {}
+
+# Allowed languages
+ALLOWED_LANGUAGES = ["en", "es", "hi", "pa"]
+
+# STT Router
+async def stt_router(audio_data, lang):
     if lang not in ALLOWED_LANGUAGES:
-        return "en"
-    return lang
+        raise ValueError(f"Language {lang} not supported")
 
-def normalize_script(lang, text):
-    """Convert wrong script to correct script for each language"""
+    if lang in ["en", "es"]:
+        # GPT-4o Transcribe (Whisper-1 backend)
+        return await gpt4o_transcribe(audio_data, lang)
+
+    if lang in ["hi", "pa"]:
+        # Sarika v2.5
+        return await sarvam_stt(audio_data, lang)
+
+async def gpt4o_transcribe(audio_data, lang):
+    """GPT-4o transcription for English and Spanish"""
+    audio_file = io.BytesIO(audio_data)
+    audio_file.name = "audio.wav"
+    
+    transcript = client.audio.transcriptions.create(
+        model="whisper-1",
+        file=audio_file,
+        language=lang,
+        response_format="json",
+        temperature=0
+    )
+    return getattr(transcript, 'text', '').strip()
+
+async def sarvam_stt(audio_data, lang):
+    """Sarvam STT for Hindi and Punjabi"""
+    lang_map = {
+        "hi": "hi-IN",
+        "pa": "pa-IN"
+    }
+    
+    if lang not in lang_map:
+        raise ValueError(f"Language {lang} not supported for Sarvam STT")
+    
     try:
-        # Hindi spoken but Urdu script → convert to Devanagari
-        if lang == "hi" and any(0x0600 <= ord(ch) <= 0x06FF for ch in text):
-            from indic_transliteration import sanscript
-            from indic_transliteration.sanscript import transliterate
-            return transliterate(text, sanscript.URDU, sanscript.DEVANAGARI)
+        # Save audio to temp file
+        with tempfile.NamedTemporaryFile(delete=False, suffix=".wav") as temp_file:
+            temp_file.write(audio_data)
+            temp_path = temp_file.name
         
-        # Punjabi spoken but Urdu script → convert to Gurmukhi
-        if lang == "pa" and any(0x0600 <= ord(ch) <= 0x06FF for ch in text):
-            from indic_transliteration import sanscript
-            from indic_transliteration.sanscript import transliterate
-            return transliterate(text, sanscript.URDU, sanscript.GURMUKHI)
+        # Use Sarvam STT API
+        with open(temp_path, "rb") as audio_file:
+            response = sarvam_client.speech_to_text.transcribe(
+                file=audio_file,
+                language_code=lang_map[lang]
+            )
         
-        # Gujarati spoken but Arabic script → convert to Gujarati
-        if lang == "gu" and any(0x0600 <= ord(ch) <= 0x06FF for ch in text):
-            from indic_transliteration import sanscript
-            from indic_transliteration.sanscript import transliterate
-            return transliterate(text, sanscript.URDU, sanscript.GUJARATI)
+        # Clean up temp file
+        try:
+            os.unlink(temp_path)
+        except:
+            pass
+            
+        # Extract transcript
+        transcript = getattr(response, 'transcript', '').strip()
+        return transcript if transcript else ""
         
-        return text
     except Exception as e:
-        print(f"Script normalization error: {e}")
-        return text
+        print(f"Sarvam STT error: {e}")
+        # Clean up temp file on error
+        try:
+            os.unlink(temp_path)
+        except:
+            pass
+        return ""
 
-def detect_language_from_text(text):
-    """Detect language from text content using Unicode ranges"""
-    text = text.strip()
 
-    # Urdu / Arabic script
-    if any(0x0600 <= ord(ch) <= 0x06FF for ch in text):
-        return "ur"
-
-    # Hindi (Devanagari)
-    if any(0x0900 <= ord(ch) <= 0x097F for ch in text):
-        return "hi"
-
-    # Punjabi (Gurmukhi)
-    if any(0x0A00 <= ord(ch) <= 0x0A7F for ch in text):
-        return "pa"
-
-    # Gujarati
-    if any(0x0A80 <= ord(ch) <= 0x0AFF for ch in text):
-        return "gu"
-
-    # Spanish letters
-    if any(ch in "áéíóúñ" for ch in text.lower()):
-        return "es"
-
-    # Kurdish
-    if any(ch in "êîşû" for ch in text.lower()):
-        return "ku"
-
-    return "en"
-
-def final_language(detected_lang):
-    """Check if detected language is allowed"""
-    if detected_lang in ALLOWED_LANGUAGES:
-        return detected_lang
-    
-    # Urdu → Hindi (language mapping)
-    if detected_lang == "ur":
-        return "hi"
-    
-    # All other non-allowed languages → English fallback
-    return "en"
-
-def process_whisper_result(whisper_response):
-    """Process Whisper result with text-based language detection"""
-    transcript = getattr(whisper_response, 'text', '').strip()
-    
-    # REAL language detection from text content
-    lang_from_text = detect_language_from_text(transcript)
-    
-    # Apply allowed languages logic
-    final_lang_value = final_language(lang_from_text)
-    
-    print(f"🎯 Text Detection: {lang_from_text} → Final: {final_lang_value}")
-    print(f"📝 Transcript: {transcript[:50]}...")
-    
-    return transcript, final_lang_value
 
 async def convert_audio_to_wav(audio_data, input_format="webm"):
-    """Convert audio to WAV format - EC2 compatible"""
+    """Convert audio to WAV format using imageio-ffmpeg"""
+    if not FFMPEG_AVAILABLE:
+        print("FFmpeg not available, using original audio")
+        return audio_data
+        
     try:
-        # EC2 will have ffmpeg installed via Dockerfile
-        print(f"Converting {input_format} audio to WAV format for better Whisper accuracy")
+        print(f"Converting {input_format} to WAV")
             
-        # Create temporary files
         with tempfile.NamedTemporaryFile(delete=False, suffix=f".{input_format}") as original_file:
             original_file.write(audio_data)
             original_file.flush()
             
-            # Create WAV output file
             with tempfile.NamedTemporaryFile(delete=False, suffix=".wav") as wav_file:
-                # FFmpeg conversion command
                 convert_cmd = [
                     ffmpeg_path,
-                    "-y",  # Overwrite output file
-                    "-i", original_file.name,  # Input file
-                    "-ar", "16000",  # Sample rate 16kHz
-                    "-ac", "1",  # Mono channel
-                    wav_file.name  # Output file
+                    "-y",
+                    "-i", original_file.name,
+                    "-ar", "16000",
+                    "-ac", "1",
+                    wav_file.name
                 ]
                 
-                print(f"Converting {input_format} to WAV: {original_file.name} -> {wav_file.name}")
-                
-                # Run FFmpeg conversion
                 process = subprocess.run(
                     convert_cmd, 
                     stdout=subprocess.PIPE, 
                     stderr=subprocess.PIPE,
-                    timeout=30
+                    timeout=30,
+                    encoding="utf-8"
                 )
                 
                 if process.returncode != 0:
-                    error_msg = process.stderr.decode() if process.stderr else "Unknown FFmpeg error"
-                    print(f"FFmpeg conversion failed: {error_msg}")
-                    # Cleanup temp files before fallback
+                    error_msg = process.stderr if process.stderr else "FFmpeg error"
+                    print(f"FFmpeg failed: {error_msg}")
                     try:
                         os.unlink(original_file.name)
                         os.unlink(wav_file.name)
                     except:
                         pass
-                    # Fallback to original data instead of failing
                     return audio_data
                 
-                # Read converted WAV file
                 with open(wav_file.name, "rb") as f:
                     wav_data = f.read()
                 
-                print(f"Conversion successful: {len(wav_data)} bytes WAV")
+                print(f"Conversion successful: {len(wav_data)} bytes")
                 
-                # Cleanup temp files
                 try:
                     os.unlink(original_file.name)
                     os.unlink(wav_file.name)
@@ -190,8 +193,7 @@ async def convert_audio_to_wav(audio_data, input_format="webm"):
                 return wav_data
                 
     except Exception as e:
-        print(f"Audio conversion error: {e} - using original data")
-        # Always fallback to original data
+        print(f"Audio conversion error: {e}")
         return audio_data
 
 app = FastAPI(title="Voice Backend Service")
@@ -199,13 +201,16 @@ app = FastAPI(title="Voice Backend Service")
 app.add_middleware(
     CORSMiddleware,
     allow_origins=[
+        "*",  # Allow all origins for development
         "https://www.edmondsbaydental.com",
         "https://voice.yesitisfree.com",
         "http://localhost:3000",
         "http://localhost:3001",
         "http://localhost:5173",
         "http://127.0.0.1:3000",
-        "http://127.0.0.1:5173"
+        "http://127.0.0.1:5173",
+        "https://localhost:3000",
+        "https://localhost:5173"
     ],
     allow_credentials=True,
     allow_methods=["*"],
@@ -217,21 +222,20 @@ client = openai.OpenAI(
     timeout=30.0
 )
 
+# Sarvam client
+sarvam_client = SarvamAI(
+    api_subscription_key=os.getenv("SARVAM_API_KEY")
+)
+
 # Multiple chatbots configuration - Add your projects here
 CHATBOT_URLS = {
-    "dr-tomar": "https://edmonds.yesitisfree.com/api/chat",
+     "dr-tomar": "https://edmonds.yesitisfree.com/api/chat",
     
     
     "default": "https://edmonds.yesitisfree.com/api/chat"
 }
 
-# Redis configuration - Disabled for now
-# redis_client = redis.Redis(
-#     host="redis-15221.c16.us-east-1-2.ec2.redns.redis-cloud.com",
-#     port=15221,
-#     password=os.getenv("REDIS_PASSWORD"),
-#     decode_responses=True
-# )
+# Redis disabled - using local cache only
 
 # Performance optimizations
 tts_cache = {}
@@ -246,20 +250,21 @@ connection_pool = httpx.AsyncClient(
     follow_redirects=True
 )
 
-# Precompute common responses
-COMMON_RESPONSES = {
-    "hello": "Hello! How can I help you today?",
-    "hi": "Hi there! What can I do for you?",
-    "thanks": "You're welcome!",
-    "bye": "Goodbye! Have a great day!",
-    
-}
 
-def get_cache_key(text):
-    return hashlib.md5(text.encode()).hexdigest()
 
-def get_cached_tts(text):
-    cache_key = get_cache_key(text)
+def safe_text(text):
+    """Guaranteed safe text conversion for TTS"""
+    if text is None:
+        return ""
+    return str(text)
+
+def get_cache_key(text, lang="en", provider="openai"):
+    """Generate cache key with text, language, and provider"""
+    cache_string = f"{text}_{lang}_{provider}"
+    return hashlib.md5(cache_string.encode()).hexdigest()
+
+def get_cached_tts(text, lang="en", provider="openai"):
+    cache_key = get_cache_key(text, lang, provider)
     if cache_key in tts_cache:
         cached_item = tts_cache[cache_key]
         if time.time() - cached_item['timestamp'] < CACHE_TTL:
@@ -268,12 +273,12 @@ def get_cached_tts(text):
             del tts_cache[cache_key]
     return None
 
-def cache_tts(text, audio_content):
+def cache_tts(text, audio_content, lang="en", provider="openai"):
     if len(tts_cache) >= CACHE_MAX_SIZE:
         oldest_key = min(tts_cache.keys(), key=lambda k: tts_cache[k]['timestamp'])
         del tts_cache[oldest_key]
     
-    cache_key = get_cache_key(text)
+    cache_key = get_cache_key(text, lang, provider)
     tts_cache[cache_key] = {
         'audio': audio_content,
         'timestamp': time.time()
@@ -300,7 +305,9 @@ def clean_text_for_tts(text):
     text = str(text)
     
     try:
-        # Remove HTML entities but keep Unicode characters for multilingual support
+        # Remove HTML entities and decode them properly
+        import html
+        text = html.unescape(text)  # Convert &#39; to ' etc.
         text = re.sub(r'&#\d+;', '', text)
         text = re.sub(r'&\w+;', '', text)
         text = re.sub(r'\s+', ' ', text).strip()
@@ -314,80 +321,132 @@ def clean_text_for_tts(text):
         print(f"Cleaning error: {e}")
         return "There was a text processing error."
 
-# ⭐ STEP 2 — Script-based Language Detection (Backup)
-async def detect_language_by_script(text):
-    """Backup language detection based on script"""
-    if not text or len(text.strip()) < 2:
+# Language normalization
+def normalize_language(lang):
+    """Normalize and validate language input"""
+    if not lang or not isinstance(lang, str):
         return "en"
     
-    # Hindi (Devanagari)
-    if any(0x0900 <= ord(ch) <= 0x097F for ch in text):
-        return "hi"
+    lang = lang.strip().lower()
+    if lang in ALLOWED_LANGUAGES:
+        return lang
     
-    # Punjabi (Gurmukhi)
-    if any(0x0A00 <= ord(ch) <= 0x0A7F for ch in text):
-        return "pa"
-    
-    # Gujarati
-    if any(0x0A80 <= ord(ch) <= 0x0AFF for ch in text):
-        return "gu"
-    
-    # Spanish common patterns
-    spanish_keywords = ["hola", "gracias", "buenos", "por favor", "¿", "¡"]
-    if any(word in text.lower() for word in spanish_keywords):
-        return "es"
-
-    # Kurdish (Latin/Arabic mixture keywords)
-    kurdish_keywords = ["slaw", "nav", "piroz", "spas", "çawa", "baş"]
-    if any(word in text.lower() for word in kurdish_keywords):
-        return "ku"
-
-    # Fallback
     return "en"
-# ⭐ STEP 3 — Chatbot function with language parameter
+
+# TTS Router
+async def tts_router(text, lang):
+    if lang not in ALLOWED_LANGUAGES:
+        raise ValueError("Unsupported language")
+
+    if lang in ["en", "es"]:
+        return await openai_tts(text, lang)   # tts-1
+
+    if lang in ["hi", "pa"]:
+        return await sarvam_tts(text, lang)   # Bulbul v2
+
+async def elevenlabs_or_gpt_tts(text, lang):
+    """ElevenLabs or GPT TTS for English and Spanish"""
+    # For now, use OpenAI TTS - can be switched to ElevenLabs later
+    return await openai_tts(text, lang)
+
+async def sarvam_tts(text, lang):
+    lang_map = {
+        "hi": "hi-IN",
+        "pa": "pa-IN"
+    }
+
+    if lang not in lang_map:
+        raise ValueError("Unsupported language for Sarvam TTS")
+
+    try:
+        response = sarvam_client.text_to_speech.convert(
+            text=text,
+            target_language_code=lang_map[lang],
+            enable_preprocessing=True
+        )
+
+        with tempfile.NamedTemporaryFile(delete=False, suffix=".wav") as f:
+            save(response, f.name)
+            temp_path = f.name
+
+        with open(temp_path, "rb") as audio:
+            audio_bytes = audio.read()
+
+        os.unlink(temp_path)
+        return audio_bytes
+
+    except Exception as e:
+        print("Sarvam SDK TTS failed:", e)
+        raise
+
+async def openai_tts(text, lang):
+    """OpenAI TTS implementation"""
+    # Only English and Spanish use alloy voice
+    voice = "alloy"
+    
+    # Use safe_text to prevent encoding issues
+    tts_text = safe_text(text)
+    
+    response = client.audio.speech.create(
+        model="tts-1",
+        voice=voice,
+        input=tts_text,
+        response_format="mp3"  # Ensure MP3 format
+    )
+    return response.content
+# LLM with forced response language
 async def get_chatbot_response(message: str, bot_id: str = "default", lang: str = "en"):
     """
-    Call the chatbot backend API safely and return the response text.
+    Call the chatbot backend API with strict language enforcement.
     """
-    # Use bot_id to get the correct URL
     chatbot_url = CHATBOT_URLS.get(bot_id, CHATBOT_URLS["default"])
+    
     payload = {
         "message": message,
         "bot_id": bot_id,
         "language": lang
     }
 
-    print(f"📡 Sending message to chatbot API: {chatbot_url}")
-    print(f"📦 Payload: {payload}")
+    print(f"Sending to chatbot: {chatbot_url}")
+    print(f"Message: {message}")
 
     try:
-        async with httpx.AsyncClient(timeout=httpx.Timeout(30.0, connect=10.0)) as client:
-            response = await client.post(chatbot_url, json=payload, headers={"Content-Type": "application/json"})
+        async with httpx.AsyncClient(timeout=httpx.Timeout(30.0)) as client:
+            response = await client.post(chatbot_url, json=payload)
 
-        print(f"✅ Chatbot API status: {response.status_code}")
-        print(f"✅ Chatbot API raw response: {response.text}")
-        print(f"🔍 Response length: {len(response.text)} characters")
-
+        print(f"Status: {response.status_code}")
+        
         if response.status_code == 200:
-            data = response.json()
-            return data.get("response") or data.get("answer") or "I'm processing your message."
+            try:
+                data = response.json()
+                bot_response = data.get("response") or data.get("answer") or "Sorry, no response"
+                
+                # Keep Unicode characters for multilingual support
+                cleaned_response = str(bot_response)
+                if not cleaned_response.strip():
+                    cleaned_response = "I understand your message."
+                
+                print(f"Bot response: {cleaned_response}")
+                return cleaned_response
+                
+            except Exception as e:
+                print(f"JSON parse error: {e}")
+                return "Response parsing failed"
         else:
-            print(f"⚠️ Chatbot API returned non-200: {response.status_code}")
-            return "I'm having trouble connecting to the assistant. Please try again."
-
-    except httpx.ConnectError as e:
-        print(f"❌ Connection error: {e}")
-        traceback.print_exc()
-        return "I couldn't reach the chatbot service. Please check your connection."
-
-    except httpx.TimeoutException:
-        print("⚠️ Timeout contacting chatbot API.")
-        return "The chatbot took too long to respond. Please try again."
+            print(f"API error: {response.status_code}")
+            return "API connection failed"
 
     except Exception as e:
-        print(f"❌ Unexpected error: {e}")
-        traceback.print_exc()
-        return "An unexpected error occurred. Please try again later."
+        print(f"Request error: {e}")
+        # Return a more user-friendly fallback message
+        if lang == "pa":
+            return "ਮਾਫ਼ ਕਰਨਾ, ਮੈਂ ਇਸ ਸਮੇਂ ਜਵਾਬ ਨਹੀਂ ਦੇ ਸਕਦਾ।"
+        elif lang == "hi":
+            return "माफ़ करें, मैं इस समय जवाब नहीं दे सकता।"
+        else:
+            return "I apologize, I cannot respond at this time."
+
+
 
 # API Endpoints
 @app.get("/session-ephemeral")
@@ -423,9 +482,9 @@ async def relay_message(request: RelayRequest):
 async def test_multilingual(message: str = "नमस्ते", bot_id: str = "default", lang: str = "hi"):
     """Test multilingual chatbot response"""
     try:
-        print(f"🧪 Testing multilingual - Message: {message}, Language: {lang}")
+        print(f"Testing multilingual - Message: {message}, Language: {lang}")
         response = await get_chatbot_response(message, bot_id, lang)
-        print(f"🧪 Test response: {response}")
+        print(f"Test response: {response}")
         return {
             "success": True,
             "input_message": message,
@@ -441,13 +500,45 @@ async def test_multilingual(message: str = "नमस्ते", bot_id: str = "
             "input_language": lang
         }
 
-async def get_redis_cache(key):
-    # Redis disabled - return None
-    return None
+@app.get("/test-chatbot-simple")
+async def test_chatbot_simple():
+    """Simple test for chatbot connection"""
+    try:
+        response = await get_chatbot_response("Hello", "dr-tomar", "en")
+        return {
+            "success": True,
+            "response": response,
+            "message": "Chatbot working!"
+        }
+    except Exception as e:
+        return {
+            "success": False,
+            "error": str(e)
+        }
 
-async def set_redis_cache(key, value):
-    # Redis disabled - do nothing
-    pass
+@app.get("/test-chatbot")
+async def test_chatbot(message: str = "Hello", bot_id: str = "dr-tomar", lang: str = "en"):
+    """Simple test endpoint for chatbot"""
+    try:
+        print(f"Testing chatbot - Message: {message}, Bot: {bot_id}, Language: {lang}")
+        response = await get_chatbot_response(message, bot_id, lang)
+        return {
+            "success": True,
+            "message": message,
+            "bot_id": bot_id,
+            "language": lang,
+            "response": response
+        }
+    except Exception as e:
+        return {
+            "success": False,
+            "error": str(e),
+            "message": message,
+            "bot_id": bot_id,
+            "language": lang
+        }
+
+
 
 def split_text_for_streaming(text, chunk_size=100):
     """Split text into chunks for streaming TTS"""
@@ -469,45 +560,25 @@ def split_text_for_streaming(text, chunk_size=100):
     return chunks
 
 async def generate_single_tts_chunk(chunk, chunk_index, lang="en"):
-    """Generate TTS for a single chunk"""
-    cache_key = get_cache_key(f"{chunk}_{lang}")
+    """Generate TTS for a single chunk using TTS router"""
+    # Ensure chunk is UTF-8 string
+    tts_chunk = str(chunk)
     
     # Check cache first
-    cached_audio = await get_redis_cache(cache_key)
-    if cached_audio:
-        return chunk_index, base64.b64decode(cached_audio), chunk
-    
-    local_cached = get_cached_tts(f"{chunk}_{lang}")
+    local_cached = get_cached_tts(tts_chunk, lang, "tts_router")
     if local_cached:
-        return chunk_index, local_cached, chunk
+        return chunk_index, local_cached, tts_chunk
     
     try:
-        # ⭐ STEP 4 — Fixed voice map (only 6 languages)
-        voice_map = {
-            "hi": "shimmer",
-            "pa": "shimmer",
-            "gu": "shimmer",
-            "es": "shimmer",
-            "ku": "alloy",
-            "en": "alloy",
-        }
-        voice = voice_map.get(lang.lower(), "alloy")
+        audio_content = await tts_router(tts_chunk, lang)
         
-        response = client.audio.speech.create(
-            model="tts-1-hd",
-            voice=voice,
-            input=chunk
-        )
-        audio_content = response.content
+        # Cache the chunk with language and provider
+        cache_tts(tts_chunk, audio_content, lang, "tts_router")
         
-        # Cache the chunk with language
-        cache_tts(f"{chunk}_{lang}", audio_content)
-        await set_redis_cache(cache_key, base64.b64encode(audio_content).decode())
-        
-        return chunk_index, audio_content, chunk
+        return chunk_index, audio_content, tts_chunk
     except Exception as e:
         print(f"TTS Chunk Error: {e}")
-        return chunk_index, None, chunk
+        return chunk_index, None, tts_chunk
 
 async def generate_tts_audio_streaming(text, websocket, lang="en"):
     """Generate TTS audio in parallel chunks and stream to websocket"""
@@ -540,41 +611,21 @@ async def generate_tts_audio_streaming(text, websocket, lang="en"):
 
 
 async def generate_tts_audio(text, lang="en"):
-    cache_key = get_cache_key(f"{text}_{lang}")
-    
-    # Check Redis first
-    cached_audio = await get_redis_cache(cache_key)
-    if cached_audio:
-        return base64.b64decode(cached_audio)
+    """Generate TTS audio using TTS router"""
+    # Ensure text is UTF-8 string
+    tts_text = str(text)
     
     # Check local cache
-    local_cached = get_cached_tts(f"{text}_{lang}")
+    local_cached = get_cached_tts(tts_text, lang, "tts_router")
     if local_cached:
         return local_cached
     
     try:
-        # ⭐ STEP 4 — Fixed voice map (only 6 languages)
-        voice_map = {
-            "hi": "shimmer",
-            "pa": "shimmer",
-            "gu": "shimmer",
-            "es": "shimmer",
-            "ku": "alloy",
-            "en": "alloy",
-        }
-        voice = voice_map.get(lang.lower(), "alloy")
-        print(f"🎵 Generating TTS with voice: {voice} for language: {lang}")
+        print(f"🎵 Generating TTS for language: {lang}")
+        audio_content = await tts_router(tts_text, lang)
         
-        response = client.audio.speech.create(
-            model="tts-1-hd",
-            voice=voice,
-            input=text
-        )
-        audio_content = response.content
-        
-        # Cache in both Redis and local with language
-        cache_tts(f"{text}_{lang}", audio_content)
-        await set_redis_cache(cache_key, base64.b64encode(audio_content).decode())
+        # Cache with language and provider
+        cache_tts(tts_text, audio_content, lang, "tts_router")
         
         return audio_content
     except Exception as e:
@@ -582,31 +633,34 @@ async def generate_tts_audio(text, lang="en"):
         return None
 
 @app.post("/stt")
-async def speech_to_text(file: UploadFile = File(...)):
+async def speech_to_text(file: UploadFile = File(...), language: str = "en"):
+    """STT endpoint using STT router"""
+    lang = normalize_language(language)
+    if lang not in ALLOWED_LANGUAGES:
+        raise HTTPException(status_code=400, detail="Unsupported language")
+    
     try:
         audio_data = await file.read()
-        audio_file = io.BytesIO(audio_data)
-        audio_file.name = "audio.wav"
+        wav_data = await convert_audio_to_wav(audio_data, "webm")
         
-        transcript = client.audio.transcriptions.create(
-            model="whisper-1",
-            file=audio_file,
-            response_format="json",
-            temperature=0
-        )
+        transcript = await stt_router(wav_data, lang)
         
         return {
-            "text": getattr(transcript, 'text', ''),
-            "language": getattr(transcript, 'language', None)
+            "text": transcript,
+            "language": lang
         }
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"STT failed: {str(e)}")
 
 @app.post("/tts")
 async def text_to_speech(request: dict):
+    """TTS endpoint using TTS router"""
+    lang = normalize_language(request.get("language"))
+    if lang not in ALLOWED_LANGUAGES:
+        raise HTTPException(status_code=400, detail="Unsupported language")
+    
     try:
         text = request.get("text", "")
-        lang = request.get("language", "en")
         clean_text = clean_text_for_tts(text)
         optimized_text = optimize_text_for_tts(clean_text)
         
@@ -624,598 +678,243 @@ async def text_to_speech(request: dict):
 
 @app.websocket("/ws/voice-realtime")
 async def voice_realtime_websocket(websocket: WebSocket, bot_id: str = "default"):
-    """Real-time voice processing with 3-second auto-stop"""
+    """Single WebSocket endpoint for voice processing"""
     await websocket.accept()
+    session_language = "en"  # Default language
     
-    audio_buffer = b""
-    recording_start_time = None
-    is_recording = False
-    session_id = int(time.time())
-    auto_stop_task = None
-    
-    async def auto_stop_recording():
-        """Auto-stop recording after 3 seconds"""
-        nonlocal is_recording, audio_buffer, session_id
-        
-        await asyncio.sleep(6.0)
-        if is_recording:
-            print(f"Auto-stopping recording after 6 seconds")
-            
-            # Stop recording first
-            is_recording = False
-            
-            await websocket.send_json({
-                "type": "recording_stopped",
-                "duration": 6.0,
-                "session_id": session_id,
-                "reason": "auto_stop"
-            })
-            
-            # Process complete audio recording
-            if len(audio_buffer) > 0:
-                asyncio.create_task(process_realtime_audio(
-                    audio_buffer, websocket, session_id, bot_id
-                ))
-            
-            # Send ready signal
-            await websocket.send_json({
-                "type": "ready_for_next",
-                "session_id": session_id
-            })
-            
-            # Reset for next recording
-            audio_buffer = b""
-            session_id = int(time.time())
-    
-    try:
-        while True:
-            # Receive audio chunk
-            data = await websocket.receive_bytes()
-            current_time = time.time()
-            
-            # Start recording timer on first audio
-            if not is_recording:
-                recording_start_time = current_time
-                is_recording = True
-                
-                print(f"Starting recording for session {session_id}")
-                
-                # Start auto-stop timer
-                auto_stop_task = asyncio.create_task(auto_stop_recording())
-                
-                await websocket.send_json({
-                    "type": "recording_started",
-                    "session_id": session_id
-                })
-            
-            # Only add to buffer if still recording
-            if is_recording:
-                audio_buffer += data
-                
-                # Skip real-time chunk processing to avoid format issues
-                # Just accumulate audio for final processing
-                
-                # Check if we hit 6 seconds (backup check)
-                recording_duration = current_time - recording_start_time
-                if recording_duration >= 6.0:
-                    is_recording = False
-                    if auto_stop_task:
-                        auto_stop_task.cancel()
-                    
-                    # Process the audio before reset
-                    if len(audio_buffer) > 0:
-                        asyncio.create_task(process_realtime_audio(
-                            audio_buffer, websocket, session_id, bot_id
-                        ))
-                    
-                    # Reset for next recording
-                    audio_buffer = b""
-                    session_id = int(time.time())
-            
-    except Exception as e:
-        print(f"Real-time WebSocket error: {e}")
-        if auto_stop_task:
-            auto_stop_task.cancel()
-        await websocket.close()
-
-async def process_realtime_audio(audio_data, websocket, session_id, bot_id="default"):
-    """Process audio in real-time with immediate response"""
-    try:
-        # Send processing status
-        await websocket.send_json({
-            "type": "processing_started",
-            "session_id": session_id
-        })
-        
-        # Validate audio data - need sufficient data for Whisper
-        if len(audio_data) < 5000:  # 5KB minimum
-            print(f"Audio data too small: {len(audio_data)} bytes")
-            await websocket.send_json({
-                "type": "no_speech_detected",
-                "session_id": session_id,
-                "reason": "audio_too_small"
-            })
-            return
-        
-        # 🔥 FFMPEG CONVERSION - Convert WebM to WAV before Whisper
-        print(f"Original audio size: {len(audio_data)} bytes")
-        
-        # Convert audio to WAV format using ffmpeg-static
-        wav_data = await convert_audio_to_wav(audio_data, "webm")
-        
-        # Create audio file object for Whisper
-        audio_file = io.BytesIO(wav_data)
-        audio_file.name = f"realtime_{session_id}.wav"
-        
-        print(f"Sending WAV to Whisper: {len(wav_data)} bytes")
-        
-        # Send converted WAV directly to Whisper
-        try:
-            transcript = client.audio.transcriptions.create(
-                model="whisper-1",
-                file=audio_file,
-                response_format="json",
-                temperature=0
-            )
-            print(f"✅ Whisper transcription successful")
-        except Exception as whisper_error:
-            print(f"❌ Whisper failed even with WAV: {whisper_error}")
-            raise whisper_error
-        
-        # 🎯 NEW LOGIC: Process Whisper result with script normalization
-        normalized_text, final_lang = process_whisper_result(transcript)
-        user_text = normalized_text
-        
-        if user_text:
-            # Send transcript immediately
-            await websocket.send_json({
-                "type": "transcript",
-                "text": user_text,
-                "language": final_lang,
-                "session_id": session_id
-            })
-            
-            # Get chatbot response with language
-            bot_response = await get_chatbot_response(user_text, bot_id, final_lang)
-            
-            # Send bot response
-            await websocket.send_json({
-                "type": "bot_response",
-                "text": bot_response,
-                "session_id": session_id
-            })
-            
-            # Generate TTS with detected language
-            clean_text = clean_text_for_tts(bot_response)
-            optimized_text = optimize_text_for_tts(clean_text)
-            audio_content = await generate_tts_audio(optimized_text, final_lang)
-            
-            if audio_content:
-                audio_b64 = base64.b64encode(audio_content).decode()
-                await websocket.send_json({
-                    "type": "audio_response",
-                    "data": audio_b64,
-                    "session_id": session_id
-                })
-        else:
-            await websocket.send_json({
-                "type": "no_speech_detected",
-                "session_id": session_id
-            })
-        
-        # Processing complete
-        await websocket.send_json({
-            "type": "processing_complete",
-            "session_id": session_id
-        })
-        
-        # Send ready signal
-        await websocket.send_json({
-            "type": "ready_for_next",
-            "session_id": session_id
-        })
-            
-    except Exception as e:
-        print(f"Realtime audio processing error: {e}")
-        await websocket.send_json({
-            "type": "processing_error",
-            "error": str(e),
-            "session_id": session_id
-        })
-        
-        # Still send ready signal even on error
-        await websocket.send_json({
-            "type": "ready_for_next",
-            "session_id": session_id
-        })
-
-async def process_complete_audio(audio_data, websocket, session_id, bot_id="default"):
-    """Process complete 3-second audio recording"""
-    try:
-        # Send processing status
-        await websocket.send_json({
-            "type": "processing_started",
-            "session_id": session_id
-        })
-        
-        # 🔥 FFMPEG CONVERSION - Convert to WAV before Whisper
-        wav_data = await convert_audio_to_wav(audio_data, "webm")
-        
-        # STT processing with converted WAV
-        audio_file = io.BytesIO(wav_data)
-        audio_file.name = f"session_{session_id}.wav"
-        
-        transcript = client.audio.transcriptions.create(
-            model="whisper-1",
-            file=audio_file,
-            response_format="json",
-            temperature=0
-        )
-        
-        # 🎯 NEW LOGIC: Process Whisper result with script normalization
-        normalized_text, final_lang = process_whisper_result(transcript)
-        user_text = normalized_text
-        
-        if user_text:
-            # Send transcript
-            await websocket.send_json({
-                "type": "transcript",
-                "text": user_text,
-                "language": final_lang,
-                "session_id": session_id
-            })
-            
-            # Get chatbot response with language
-            bot_response = await get_chatbot_response(user_text, bot_id, final_lang)
-            
-            # Send bot response
-            await websocket.send_json({
-                "type": "bot_response",
-                "text": bot_response,
-                "session_id": session_id
-            })
-            
-            # Generate TTS with detected language
-            clean_text = clean_text_for_tts(bot_response)
-            optimized_text = optimize_text_for_tts(clean_text)
-            audio_content = await generate_tts_audio(optimized_text, final_lang)
-            
-            if audio_content:
-                audio_b64 = base64.b64encode(audio_content).decode()
-                await websocket.send_json({
-                    "type": "audio_response",
-                    "data": audio_b64,
-                    "session_id": session_id
-                })
-        else:
-            await websocket.send_json({
-                "type": "no_speech_detected",
-                "session_id": session_id
-            })
-        
-        # Processing complete
-        await websocket.send_json({
-            "type": "processing_complete",
-            "session_id": session_id
-        })
-            
-    except Exception as e:
-        print(f"Audio processing error: {e}")
-        await websocket.send_json({
-            "type": "processing_error",
-            "error": str(e),
-            "session_id": session_id
-        })
-
-async def process_audio_chunk(audio_data, websocket, chunk_id):
-    """Process individual audio chunk in real-time"""
-    try:
-        # Skip if audio data is too small - need at least 1KB for Whisper
-        if len(audio_data) < 2000:
-            print(f"Skipping small chunk: {len(audio_data)} bytes")
-            return
-            
-        # 🔥 FFMPEG CONVERSION - Convert to WAV before Whisper
-        wav_data = await convert_audio_to_wav(audio_data, "webm")
-        
-        # Quick STT processing with converted WAV
-        audio_file = io.BytesIO(wav_data)
-        audio_file.name = f"chunk_{chunk_id}.wav"
-        
-        try:
-            transcript = client.audio.transcriptions.create(
-                model="whisper-1",
-                file=audio_file,
-                response_format="json",
-                temperature=0
-            )
-        except Exception as whisper_error:
-            print(f"Chunk Whisper API error: {whisper_error}")
-            # Skip this chunk if format error
-            if "Invalid file format" in str(whisper_error):
-                print(f"Skipping chunk {chunk_id} due to format error")
-                return
-            else:
-                raise whisper_error
-        
-        # Handle both text response and object response
-        if isinstance(transcript, str):
-            chunk_text = transcript.strip()
-        else:
-            chunk_text = getattr(transcript, 'text', '').strip()
-        
-        if chunk_text:
-            # Send partial transcript immediately
-            await websocket.send_json({
-                "type": "partial_transcript",
-                "text": chunk_text,
-                "chunk_id": chunk_id
-            })
-            
-            # Process with chatbot immediately (don't wait)
-            asyncio.create_task(process_chunk_response(chunk_text, websocket, chunk_id))
-            
-    except Exception as e:
-        print(f"Chunk processing error: {e}")
-        # Don't fail completely, just skip this chunk
-
-async def process_chunk_response(text, websocket, chunk_id, bot_id="default"):
-    """Process chatbot response for chunk"""
-    try:
-        # Get bot response with language
-        detected = await detect_language_by_script(text)
-        lang = final_language(detected)
-        bot_response = await get_chatbot_response(text, bot_id, lang)
-        
-        # Send response immediately
-        await websocket.send_json({
-            "type": "chunk_response",
-            "text": bot_response,
-            "chunk_id": chunk_id
-        })
-        
-        asyncio.create_task(generate_chunk_tts(bot_response, websocket, chunk_id, lang))
-        
-    except Exception as e:
-        print(f"Chunk response error: {e}")
-
-async def generate_chunk_tts(text, websocket, chunk_id, lang="en"):
-    """Generate TTS for chunk response"""
-    try:
-        clean_text = clean_text_for_tts(text)
-        optimized_text = optimize_text_for_tts(clean_text)
-        
-        audio_content = await generate_tts_audio(optimized_text, lang)
-        
-        if audio_content:
-            audio_b64 = base64.b64encode(audio_content).decode()
-            await websocket.send_json({
-                "type": "chunk_audio",
-                "data": audio_b64,
-                "chunk_id": chunk_id
-            })
-            
-    except Exception as e:
-        print(f"Chunk TTS error: {e}")
-
-@app.websocket("/ws/voice-stream")
-async def voice_stream_websocket(websocket: WebSocket, bot_id: str = "default"):
-    await websocket.accept()
-    
-    try:
-        while True:
-            data = await websocket.receive_bytes()
-            
-            # 🔥 FFMPEG CONVERSION - Convert to WAV before Whisper
-            wav_data = await convert_audio_to_wav(data, "webm")
-            
-            audio_file = io.BytesIO(wav_data)
-            audio_file.name = "stream.wav"
-            
-            # STT with auto language detection
-            transcript = client.audio.transcriptions.create(
-                model="whisper-1",
-                file=audio_file,
-                response_format="json",
-                temperature=0
-            )
-            
-            # 🎯 NEW LOGIC: Process Whisper result with script normalization
-            normalized_text, final_lang = process_whisper_result(transcript)
-            user_text = normalized_text
-            
-            await websocket.send_json({
-                "type": "transcript",
-                "text": user_text,
-                "language": final_lang
-            })
-            
-            # Ultra-fast parallel processing
-            async def get_and_send_response():
-                bot_response = await get_chatbot_response(user_text, bot_id, final_lang)
-                await websocket.send_json({
-                    "type": "bot_response",
-                    "text": bot_response
-                })
-                return bot_response
-            
-            async def process_tts(bot_response):
-                clean_response = clean_text_for_tts(bot_response)
-                optimized_response = optimize_text_for_tts(clean_response)
-                await generate_tts_audio_streaming(optimized_response, websocket, final_lang)
-                await websocket.send_json({"type": "audio_complete"})
-            
-            # Start chat response immediately
-            response_task = asyncio.create_task(get_and_send_response())
-            
-            # When response is ready, start TTS in parallel
-            bot_response = await response_task
-            asyncio.create_task(process_tts(bot_response))
-            
-    except Exception as e:
-        print(f"WebSocket error: {e}")
-        await websocket.close()
-
-@app.websocket("/ws/voice-stream-legacy")
-async def voice_stream_legacy(websocket: WebSocket, bot_id: str = "default"):
-    """Legacy endpoint with full audio response"""
-    await websocket.accept()
-    
-    try:
-        while True:
-            data = await websocket.receive_bytes()
-            
-            # 🔥 FFMPEG CONVERSION - Convert to WAV before Whisper
-            wav_data = await convert_audio_to_wav(data, "webm")
-            
-            audio_file = io.BytesIO(wav_data)
-            audio_file.name = "stream.wav"
-            
-            transcript = client.audio.transcriptions.create(
-                model="whisper-1",
-                file=audio_file,
-                response_format="json",
-                temperature=0
-            )
-            
-            # 🎯 NEW LOGIC: Process Whisper result with script normalization
-            normalized_text, final_lang = process_whisper_result(transcript)
-            user_text = normalized_text
-            
-            await websocket.send_json({
-                "type": "transcript",
-                "text": user_text,
-                "language": final_lang
-            })
-            
-            async def process_response():
-                bot_response = await get_chatbot_response(user_text, bot_id, final_lang)
-                
-                await websocket.send_json({
-                    "type": "bot_response",
-                    "text": bot_response
-                })
-                
-                clean_response = clean_text_for_tts(bot_response)
-                optimized_response = optimize_text_for_tts(clean_response)
-                
-                audio_content = await generate_tts_audio(optimized_response, final_lang)
-                if audio_content:
-                    audio_b64 = base64.b64encode(audio_content).decode()
-                    await websocket.send_json({
-                        "type": "audio",
-                        "data": audio_b64
-                    })
-                else:
-                    await websocket.send_json({
-                        "type": "error",
-                        "message": "TTS failed, but text response available"
-                    })
-            
-            asyncio.create_task(process_response())
-            
-    except Exception as e:
-        print(f"WebSocket error: {e}")
-        await websocket.close()
-
-@app.websocket("/ws/{bot_id}")
-async def websocket_bot_endpoint_old(websocket: WebSocket, bot_id: str = "default"):
-    await websocket.accept()
     print(f"WebSocket connected for bot_id: {bot_id}")
     
     try:
         while True:
-            data = await websocket.receive_json()
-            
-            if data.get("type") == "message":
-                message = data.get("message", "")
+            try:
+                # Wait for any message
+                message_data = await websocket.receive()
+                print(f"Raw message received: {type(message_data)}, keys: {list(message_data.keys()) if isinstance(message_data, dict) else 'not dict'}")
                 
-                # Detect language and get chatbot response
-                detected = await detect_language_by_script(message)
-                lang = final_language(detected)
-                response_text = await get_chatbot_response(message, bot_id, lang)
-                
-                # Send text response
-                await websocket.send_json({
-                    "type": "text_response",
-                    "text": response_text,
-                    "bot_id": bot_id
-                })
-                
-                # Generate TTS audio
-                cleaned_text = clean_text_for_tts(response_text)
-                optimized_text = optimize_text_for_tts(cleaned_text)
-                audio_content = await generate_tts_audio(optimized_text)
-                
-                if audio_content:
-                    audio_b64 = base64.b64encode(audio_content).decode()
+                # Handle different message types
+                if "text" in message_data:
+                    # Text message - try to parse as JSON
+                    try:
+                        message = json.loads(message_data["text"])
+                        print(f"Parsed JSON message type: {message.get('type', 'unknown')}")
+                    except json.JSONDecodeError as e:
+                        print(f"Failed to parse JSON: {e}")
+                        continue
+                        
+                elif "json" in message_data:
+                    # Direct JSON message
+                    message = message_data["json"]
+                    print(f"Direct JSON message type: {message.get('type', 'unknown')}")
+                    
+                elif "bytes" in message_data:
+                    # Full audio blob received - process STT immediately
+                    audio_bytes = message_data["bytes"]
+                    session_id = int(time.time())
+                    print(f"Received full audio blob: {len(audio_bytes)} bytes")
+                    
+                    # Process full audio immediately
+                    try:
+                        # Convert to WAV once
+                        wav_data = await convert_audio_to_wav(audio_bytes, "webm")
+                        
+                        # Run STT once on complete audio
+                        user_text = await stt_router(wav_data, session_language)
+                        
+                        if not user_text:
+                            await websocket.send_json({
+                                "type": "no_speech_detected",
+                                "session_id": session_id
+                            })
+                            continue
+                        
+                        # Send transcript
+                        await websocket.send_json({
+                            "type": "transcript",
+                            "text": user_text,
+                            "language": session_language,
+                            "session_id": session_id
+                        })
+                        
+                        # Get bot response
+                        bot_response = await get_chatbot_response(user_text, bot_id, session_language)
+                        
+                        await websocket.send_json({
+                            "type": "bot_response",
+                            "text": bot_response,
+                            "session_id": session_id
+                        })
+                        
+                        # Generate TTS
+                        clean_text = clean_text_for_tts(bot_response)
+                        optimized_text = optimize_text_for_tts(clean_text)
+                        audio_content = await generate_tts_audio(optimized_text, session_language)
+                        
+                        if audio_content:
+                            audio_b64 = base64.b64encode(audio_content).decode()
+                            await websocket.send_json({
+                                "type": "audio_response",
+                                "data": audio_b64,
+                                "format": "wav" if session_language in ["hi", "pa"] else "mp3",
+                                "session_id": session_id
+                            })
+                        
+                    except Exception as e:
+                        print(f"Audio processing error: {e}")
+                        await websocket.send_json({
+                            "type": "processing_error",
+                            "error": str(e),
+                            "session_id": session_id
+                        })
+                    
+                    continue
+                else:
+                    print(f"Unknown message format: {message_data}")
+                    continue
+                # Process the parsed message
+                if message.get("type") == "config":
+                    # Language configuration from frontend
+                    session_language = normalize_language(message.get("language", "en"))
+                    print(f"Language configured: {session_language}")
                     await websocket.send_json({
-                        "type": "audio_response",
-                        "data": audio_b64,
-                        "bot_id": bot_id
+                        "type": "config_received",
+                        "language": session_language
                     })
-                
+                    
+                elif message.get("type") == "processing_complete":
+                    # Just a signal that recording finished
+                    session_id = message.get("session_id", int(time.time()))
+                    print(f"Recording finished for session {session_id}")
+                    # STT already processed when audio bytes were received
+                    
+                elif message.get("type") == "audio":
+                    audio_b64 = message.get("audio", "")
+                    lang = normalize_language(message.get("language", session_language))
+                    session_id = message.get("session_id", int(time.time()))
+                    
+                    print(f"Processing audio message - Language: {lang}, Audio size: {len(audio_b64)} chars")
+                    
+                    # Language validation
+                    if lang not in ALLOWED_LANGUAGES:
+                        await websocket.send_json({
+                            "type": "error",
+                            "message": "Unsupported language",
+                            "session_id": session_id
+                        })
+                        continue
+                    
+                    if not audio_b64:
+                        await websocket.send_json({
+                            "type": "error",
+                            "message": "No audio data provided",
+                            "session_id": session_id
+                        })
+                        continue
+                    
+                    # Decode audio data and process immediately
+                    try:
+                        audio_data = base64.b64decode(audio_b64)
+                        print(f"Decoded audio data: {len(audio_data)} bytes")
+                        
+                        # Process immediately like the bytes handler above
+                        wav_data = await convert_audio_to_wav(audio_data, "webm")
+                        user_text = await stt_router(wav_data, lang)
+                        
+                        if not user_text:
+                            await websocket.send_json({
+                                "type": "no_speech_detected",
+                                "session_id": session_id
+                            })
+                            continue
+                        
+                        await websocket.send_json({
+                            "type": "transcript",
+                            "text": user_text,
+                            "language": lang,
+                            "session_id": session_id
+                        })
+                        
+                        bot_response = await get_chatbot_response(user_text, bot_id, lang)
+                        await websocket.send_json({
+                            "type": "bot_response",
+                            "text": bot_response,
+                            "session_id": session_id
+                        })
+                        
+                        clean_text = clean_text_for_tts(bot_response)
+                        optimized_text = optimize_text_for_tts(clean_text)
+                        audio_content = await generate_tts_audio(optimized_text, lang)
+                        
+                        if audio_content:
+                            audio_b64 = base64.b64encode(audio_content).decode()
+                            await websocket.send_json({
+                                "type": "audio_response",
+                                "data": audio_b64,
+                                "format": "wav" if lang in ["hi", "pa"] else "mp3",
+                                "session_id": session_id
+                            })
+                    except Exception as e:
+                        print(f"Audio decode error: {e}")
+                        await websocket.send_json({
+                            "type": "error",
+                            "message": f"Invalid audio data: {e}",
+                            "session_id": session_id
+                        })
+                        
+            except Exception as e:
+                print(f"WebSocket message processing error: {e}")
+                break
+            
     except Exception as e:
-        print(f"WebSocket error for bot_id {bot_id}: {e}")
-    finally:
-        print(f"WebSocket disconnected for bot_id: {bot_id}")
+        print(f"WebSocket error: {e}")
+        await websocket.close()
 
 @app.post("/voice-chat")
-async def voice_chat(file: UploadFile = File(...), bot_id: str = "default"):
+@app.get("/voice-chat")
+async def voice_chat(file: UploadFile = File(None), bot_id: str = "default", language: str = "en"):
+    """Voice chat endpoint with forced language"""
+    lang = normalize_language(language)
+    if lang not in ALLOWED_LANGUAGES:
+        raise HTTPException(status_code=400, detail="Unsupported language")
+    
+    # Handle GET request for testing
+    if file is None:
+        return {
+            "message": "Voice chat endpoint is working",
+            "supported_languages": ALLOWED_LANGUAGES,
+            "current_language": lang,
+            "bot_id": bot_id
+        }
+    
     try:
-        print(f"Processing voice chat for bot_id: {bot_id}")
-        
-        # Read and validate audio
         audio_data = await file.read()
         if len(audio_data) == 0:
             raise HTTPException(status_code=400, detail="Empty audio file")
         
-        print(f"Original audio file size: {len(audio_data)} bytes")
-        
-        # 🔥 FFMPEG CONVERSION - Convert to WAV before Whisper
+        # Convert audio to WAV
         wav_data = await convert_audio_to_wav(audio_data, "webm")
         
-        # STT Processing with converted WAV
-        audio_file = io.BytesIO(wav_data)
-        audio_file.name = "audio.wav"
-        
-        print(f"Sending WAV to Whisper: {len(wav_data)} bytes")
-        
-        transcript = client.audio.transcriptions.create(
-            model="whisper-1",
-            file=audio_file,
-            response_format="json",
-            temperature=0
-        )
-        
-        # 🎯 NEW LOGIC: Process Whisper result with script normalization
-        normalized_text, final_lang = process_whisper_result(transcript)
-        user_text = normalized_text
+        # Use STT router with forced language
+        user_text = await stt_router(wav_data, lang)
         if not user_text:
             user_text = "Hello"
         
-        print(f"User: {user_text} (Language: {final_lang})")
+        print(f"User: {user_text} (Language: {lang})")
         
-        # Get chatbot response with language
-        bot_response = await get_chatbot_response(user_text, bot_id, final_lang)
-        print(f"Bot original: {bot_response}")
+        # Get chatbot response with forced language
+        bot_response = await get_chatbot_response(user_text, bot_id, lang)
         
         # Clean and optimize response
         clean_response = clean_text_for_tts(bot_response)
         optimized_response = optimize_text_for_tts(clean_response)
-        print(f"Bot optimized: {optimized_response}")
         
-        # Generate TTS with detected language
-        audio_content = await generate_tts_audio(optimized_response, final_lang)
+        # Generate TTS with forced language
+        audio_content = await generate_tts_audio(optimized_response, lang)
         
         if audio_content:
+            # Remove headers to avoid latin-1 encoding issues
             return Response(
                 content=audio_content,
-                media_type="audio/mpeg",
-                headers={
-                    "X-Transcript": user_text,
-                    "X-Bot-Response": optimized_response
-                }
+                media_type="audio/mpeg"
             )
         else:
             return {
@@ -1225,7 +924,7 @@ async def voice_chat(file: UploadFile = File(...), bot_id: str = "default"):
             }
         
     except Exception as e:
-        print(f"Voice chat error: {type(e).__name__}: {str(e)}")
+        print(f"Voice chat error: {e}")
         return {
             "transcript": "",
             "response": "I had trouble processing your request. Please try again.",
@@ -1235,10 +934,6 @@ async def voice_chat(file: UploadFile = File(...), bot_id: str = "default"):
 @app.get("/")
 async def root():
     redis_status = "disabled"
-    # try:
-    #     await redis_client.ping()
-    # except:
-    #     redis_status = "disconnected"
     
     return {
         "message": "Voice Backend Service is running", 
@@ -1250,13 +945,17 @@ async def root():
             "cache_ttl": "24 hours"
         },
         "endpoints": {
-            "voice_realtime": "/ws/voice-realtime (Real-time Processing)",
-            "voice_stream": "/ws/voice-stream (Streaming TTS)",
-            "voice_stream_legacy": "/ws/voice-stream-legacy (Full Audio)",
+            "voice_realtime": "/ws/voice-realtime (Single WebSocket Endpoint)",
             "voice_chat": "/voice-chat",
             "stt": "/stt",
             "tts": "/tts",
             "relay": "/relay-message"
+        },
+        "architecture": {
+            "stt_routing": "Language-based STT routing (GPT-4o, Sarvam, ElevenLabs)",
+            "tts_routing": "Language-based TTS routing (OpenAI, Sarvam, Ethiopic)",
+            "language_detection": "Disabled - UI forces language",
+            "cache_strategy": "Text + Language + Provider based caching"
         }
     }
 
