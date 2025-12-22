@@ -959,6 +959,10 @@ async def root():
         }
     }
 
+@app.get("/health")
+async def health_check():
+    return {"status": "healthy", "service": "voice-backend"}
+
 @app.on_event("shutdown")
 async def shutdown_event():
     await connection_pool.aclose()
