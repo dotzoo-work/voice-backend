@@ -201,7 +201,7 @@ app = FastAPI(title="Voice Backend Service")
 app.add_middleware(
     CORSMiddleware,
     allow_origins=[
-        "*",  # Allow all origins for development
+        "*",  ## Allow all origins for development
         "https://www.edmondsbaydental.com",
         "https://voice.yesitisfree.com",
         "http://localhost:3000",

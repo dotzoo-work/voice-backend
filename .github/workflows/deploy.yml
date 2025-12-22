@@ -92,6 +92,7 @@ jobs:
             -e AWS_SECRET_ACCESS_KEY="${{ secrets.AWS_SECRET_ACCESS_KEY }}" \
             -e AWS_DEFAULT_REGION="${{ secrets.AWS_DEFAULT_REGION }}" \
             -e OPENAI_API_KEY="${{ secrets.OPENAI_API_KEY }}" \
+            -e SARVAM_API_KEY="${{ secrets.SARVAM_API_KEY }}" \
             -e REDIS_URL="${{ secrets.REDIS_URL }}" \
             -e ENVIRONMENT="production" \
             -e PORT="8090" \
