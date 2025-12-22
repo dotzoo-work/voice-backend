@@ -104,5 +104,15 @@ jobs:
 
       - name: Health check
         run: |
-          sleep 10
-          curl -f http://localhost:8090/ || exit 1
+          echo "Waiting for application to start..."
+          for i in {1..30}; do
+            if curl -f http://localhost:8090/health 2>/dev/null || curl -f http://localhost:8090/ 2>/dev/null; then
+              echo "✅ Application is healthy!"
+              exit 0
+            fi
+            echo "Attempt $i/30: Application not ready yet, waiting 5 seconds..."
+            sleep 5
+          done
+          echo "❌ Health check failed after 150 seconds"
+          docker logs voice-bot-backend --tail 50
+          exit 1
