@@ -1,151 +1,25 @@
-name: CI/CD Deploy Voice Bot Backend too EC2
+name: Deploy Voice Bot Backend (No Docker)
 
 on:
   push:
-    branches: [main]
+    branches: [ main ]
     paths: ['backend/**']
 
 jobs:
-  Continuous-Integration:
-    runs-on: ubuntu-latest
+  deploy:
+    runs-on: ubuntu-latest   # ✅ GitHub ka runner
 
     steps:
-      - name: Checkout code
-        uses: actions/checkout@v3
-
-      - name: Set up Python
-        uses: actions/setup-python@v4
+      - name: Deploy to EC2 via SSH
+        uses: appleboy/ssh-action@v1.0.3
         with:
-          python-version: '3.11'
-
-      - name: Install dependencies and test
-        run: |
-          cd backend
-          pip install -r requirements.txt
-          python -c "import fastapi; print('✅ FastAPI imports successfully')"
-
-      - name: Configure AWS credentials
-        uses: aws-actions/configure-aws-credentials@v1
-        with:
-          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
-          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
-          aws-region: ${{ secrets.AWS_DEFAULT_REGION }}
-
-      - name: Login to Amazon ECR
-        id: login-ecr
-        uses: aws-actions/amazon-ecr-login@v1
-
-      - name: Build, tag, and push image to Amazon ECR
-        id: build-image
-        env:
-          ECR_REGISTRY: ${{ steps.login-ecr.outputs.registry }}
-          ECR_REPOSITORY: ${{ secrets.ECR_REPO }}
-        run: |
-          cd backend
-          IMAGE_TAG=$(date +%Y%m%d%H%M%S)-$(git rev-parse --short HEAD)
-          docker build --no-cache -t $ECR_REGISTRY/$ECR_REPOSITORY:$IMAGE_TAG -t $ECR_REGISTRY/$ECR_REPOSITORY:latest .
-          docker push $ECR_REGISTRY/$ECR_REPOSITORY:$IMAGE_TAG
-          docker push $ECR_REGISTRY/$ECR_REPOSITORY:latest
-          echo "image=$ECR_REGISTRY/$ECR_REPOSITORY:$IMAGE_TAG" >> $GITHUB_OUTPUT
-
-  Continuous-Deployment:
-    needs: Continuous-Integration
-    runs-on: self-hosted
-
-    steps:
-      - name: Checkout code
-        uses: actions/checkout@v3
-
-      - name: Configure AWS credentials
-        uses: aws-actions/configure-aws-credentials@v1
-        with:
-          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
-          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
-          aws-region: ${{ secrets.AWS_DEFAULT_REGION }}
-
-      - name: Login to Amazon ECR
-        id: login-ecr
-        uses: aws-actions/amazon-ecr-login@v1
-
-      - name: Stop and remove existing container
-        run: |
-          CONTAINER_ID=$(docker ps -aq -f name=voice-bot-backend)
-          if [ ! -z "$CONTAINER_ID" ]; then
-            echo "Stopping existing container..."
-            docker stop -t 30 $CONTAINER_ID || true
-            echo "Removing existing container..."
-            docker rm -f $CONTAINER_ID || true
-          else
-            echo "No existing container found."
-          fi
-
-      - name: Pull latest image
-        run: |
-          docker pull "${{ steps.login-ecr.outputs.registry }}/${{ secrets.ECR_REPO }}:latest"
-
-      - name: Run Docker Container
-        run: |
-          echo "Starting new container..."
-          docker run -d --name voice-bot-backend \
-            --restart unless-stopped \
-            -e AWS_ACCESS_KEY_ID="${{ secrets.AWS_ACCESS_KEY_ID }}" \
-            -e AWS_SECRET_ACCESS_KEY="${{ secrets.AWS_SECRET_ACCESS_KEY }}" \
-            -e AWS_DEFAULT_REGION="${{ secrets.AWS_DEFAULT_REGION }}" \
-            -e OPENAI_API_KEY="${{ secrets.OPENAI_API_KEY }}" \
-            -e SARVAM_API_KEY="${{ secrets.SARVAM_API_KEY }}" \
-            -e REDIS_URL="${{ secrets.REDIS_URL }}" \
-            -e ENVIRONMENT="production" \
-            -e PORT="8090" \
-            -p 8090:8090 \
-            "${{ steps.login-ecr.outputs.registry }}/${{ secrets.ECR_REPO }}:latest"
-          
-          echo "Container started, checking status..."
-          sleep 3
-          docker ps | grep voice-bot-backend || {
-            echo "Container failed to start, checking logs:"
-            docker logs voice-bot-backend
-            exit 1
-          }
-
-      - name: Clean up old Docker images
-        run: |
-          echo "Cleaning up unused Docker images..."
-          docker image prune -af
-
-      - name: Health check
-        run: |
-          echo "Waiting for application to start..."
-          
-          # Wait for container to be running
-          for i in {1..30}; do
-            if docker ps | grep -q "voice-bot-backend"; then
-              echo "✅ Container is running"
-              break
-            fi
-            echo "Attempt $i/30: Container not running yet, waiting 2 seconds..."
-            sleep 2
-          done
-          
-          # Check container logs
-          echo "📋 Container logs:"
-          docker logs voice-bot-backend --tail 20
-          
-          # Health check with retries
-          for i in {1..30}; do
-            if curl -f http://localhost:8090/health 2>/dev/null; then
-              echo "✅ Health check passed!"
-              exit 0
-            elif curl -f http://localhost:8090/ 2>/dev/null; then
-              echo "✅ Root endpoint working!"
-              exit 0
-            fi
-            echo "Attempt $i/30: Health check failed, waiting 5 seconds..."
-            sleep 5
-          done
-          
-          echo "❌ Health check failed after 150 seconds"
-          echo "📋 Final container logs:"
-          docker logs voice-bot-backend --tail 50
-          echo "📋 Container status:"
-          docker ps -a | grep voice-bot-backend
-          exit 1
+          host: ${{ secrets.EC2_HOST }}
+          username: ubuntu
+          key: ${{ secrets.EC2_KEY }}
+          script: |
+            set -e
+            cd /home/ubuntu/apps/voice-bot/backend
+            git pull origin main
+            source venv/bin/activate
+            pip install -r requirements.txt
+            sudo systemctl restart voice-bot-backend
